@@ -1,0 +1,6 @@
+[submodule "external/d3d12ma"]
+	path = external/d3d12ma
+	url = https://github.com/lodinukal/d3d12ma
+[submodule "external/slang"]
+	path = external/slang
+	url = https://github.com/DragosPopse/odin-slang
