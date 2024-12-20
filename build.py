@@ -119,6 +119,7 @@ class BuildMode(Enum):
 class Builder:
     proj: str
     collections: dict[str, str] = {}
+    defines: dict[str, any] = {}
     output: str = "build"
     debug: bool = True
     os: str = host_os()
@@ -177,6 +178,8 @@ class Builder:
         args.append(f"-target:{self.target()}")
         args.append(f"-out:{self.output}/{self.proj}{self.extension()}")
         args.append(f"-build-mode:{self.mode.name}")
+        for define, value in self.defines.items():
+            args.append(f"-define:{define}={value}")
         subprocess.run(args, check=True)
 
     def run(self):
@@ -204,6 +207,7 @@ def build_app(debug=False):
     opts.proj = "app"
     opts.collections["en"] = "."
     opts.collections["external"] = "external"
+    opts.defines["slang_linked"] = True
     opts.debug = debug
     opts.build()
     return opts

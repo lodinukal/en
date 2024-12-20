@@ -8,6 +8,9 @@ import sp "external:slang/slang"
 
 import "en:gpu"
 
+@(private = "file")
+LINKED :: #config(slang_linked, false)
+
 slang_check :: #force_inline proc(#any_int result: int, loc := #caller_location) {
 	result := -sp.Result(result)
 	if sp.FAILED(result) {
@@ -62,6 +65,10 @@ diagnostics_check :: #force_inline proc(diagnostics: ^sp.IBlob, loc := #caller_l
 }
 
 create_global_session :: proc() -> ^sp.IGlobalSession {
+	when !LINKED {
+		log.errorf("Slang is not linked")
+		return nil
+	}
 	using sp
 	session: ^IGlobalSession
 	slang_check(sp.createGlobalSession(sp.API_VERSION, &session))

@@ -33,6 +33,7 @@ main :: proc() {
 	defer destroy_renderer(&ren)
 
 	session := create_global_session()
+	if session == nil do return
 	defer destroy_global_session(session)
 
 	forward_compiled, ok_forward := compile_shader(
