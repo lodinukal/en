@@ -2,6 +2,7 @@ package app
 
 import "core:container/small_array"
 import "core:log"
+import "core:mem"
 import "core:slice"
 import sp "external:slang/slang"
 
@@ -77,34 +78,50 @@ Shader_Stage :: enum {
 	Fragment,
 }
 
+Target :: enum u8 {
+	DXIL  = 0,
+	SPIRV = 1,
+}
+
 compile_shader :: proc(
 	global_session: ^sp.IGlobalSession,
 	path: cstring,
 	stages: gpu.Stage_Flags,
+	target: Target = .DXIL,
+	allocator := context.allocator,
 ) -> (
 	result: [Shader_Stage][]u8,
-	ok: bool,
+	ok: bool = true,
 ) {
 	using sp
 	code, diagnostics: ^IBlob
 	r: Result
 
-	target_desc := TargetDesc {
+	target_dxil_desc := TargetDesc {
 		structureSize = size_of(TargetDesc),
 		format        = .DXIL,
+		flags         = {},
+		profile       = global_session->findProfile("sm_6_0"),
+	}
+
+	target_spirv_desc := TargetDesc {
+		structureSize = size_of(TargetDesc),
+		format        = .SPIRV,
 		flags         = {.GENERATE_SPIRV_DIRECTLY},
 		profile       = global_session->findProfile("sm_6_0"),
 	}
+
+	targets := [?]TargetDesc{target_dxil_desc, target_spirv_desc}
 
 	compiler_option_entries := [?]CompilerOptionEntry {
 		{name = .VulkanUseEntryPointName, value = {intValue0 = 1}},
 	}
 	session_desc := SessionDesc {
 		structureSize            = size_of(SessionDesc),
-		targets                  = &target_desc,
-		targetCount              = 1,
+		targets                  = raw_data(targets[:]),
+		targetCount              = len(targets),
 		compilerOptionEntries    = &compiler_option_entries[0],
-		compilerOptionEntryCount = 1,
+		compilerOptionEntryCount = len(compiler_option_entries),
 	}
 	session: ^ISession
 	slang_check(global_session->createSession(session_desc, &session))
@@ -117,7 +134,7 @@ compile_shader :: proc(
 	diagnostics_check(diagnostics)
 	defer module->release()
 
-	components: small_array.Small_Array(len(Shader_Stage) + 1, ^IComponentType)
+	components: [Shader_Stage]^IComponentType
 
 	// compute
 	if stages == {.Compute_Shader} {
@@ -127,7 +144,7 @@ compile_shader :: proc(
 			log.errorf("no compute shader entry point")
 			return
 		}
-		small_array.append(&components, entry_point)
+		components[.Compute] = entry_point
 	} else if stages == {.Vertex_Shader, .Fragment_Shader} {
 		vs_entry_point: ^IEntryPoint
 		fs_entry_point: ^IEntryPoint
@@ -140,31 +157,55 @@ compile_shader :: proc(
 			return
 		}
 
-		small_array.append(&components, vs_entry_point)
-		if fs_entry_point != nil {
-			small_array.append(&components, fs_entry_point)
-		}
+		components[.Vertex] = vs_entry_point
+		components[.Fragment] = fs_entry_point
+	} else {
+		log.errorf("Unsupported shader stages")
+		ok = false
+		return
 	}
 
-	linked_program: ^IComponentType
-	r =
-	session->createCompositeComponentType(
-		raw_data(components.data[:]),
-		small_array.len(components),
-		&linked_program,
-		&diagnostics,
-	)
-	diagnostics_check(diagnostics)
-	slang_check(r)
+	for &output, stage in result {
+		if components[stage] == nil do continue
+		link_components := [2]^IComponentType{components[stage], module}
 
-	target_code: ^IBlob
-	r = linked_program->getTargetCode(0, &target_code, &diagnostics)
-	diagnostics_check(diagnostics)
-	slang_check(r)
+		linked_program: ^IComponentType
+		r =
+		session->createCompositeComponentType(
+			raw_data(link_components[:]),
+			2,
+			&linked_program,
+			&diagnostics,
+		)
+		diagnostics_check(diagnostics)
+		slang_check(r)
 
-	code_size := target_code->getBufferSize()
-	source_code := slice.bytes_from_ptr(target_code->getBufferPointer(), auto_cast code_size)
+		target_code: ^IBlob
+		r = linked_program->getTargetCode(int(target), &target_code, &diagnostics)
+		diagnostics_check(diagnostics)
+		slang_check(r)
+
+		code_size := target_code->getBufferSize()
+		source_code := slice.from_ptr((^u8)(target_code->getBufferPointer()), auto_cast code_size)
+
+		error: mem.Allocator_Error
+		output, error = make([]u8, code_size, allocator)
+		if error != nil {
+			log.errorf("Failed to allocate memory for shader code")
+			ok = false
+			return
+		}
+
+		copy_slice(output, source_code)
+	}
 
 
 	return
+}
+
+free_shader :: proc(result: [Shader_Stage][]u8, allocator := context.allocator) {
+	for output in result {
+		if output == nil do continue
+		free(raw_data(output), allocator)
+	}
 }

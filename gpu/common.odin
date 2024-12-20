@@ -1604,7 +1604,7 @@ Window :: struct {
 Swapchain_Desc :: struct {
 	window:         Window,
 	command_queue:  ^Command_Queue,
-	width, height:  dim,
+	size:           [2]dim,
 	texture_num:    u8,
 	format:         Swapchain_Format,
 	vsync_interval: u8,

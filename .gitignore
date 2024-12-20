@@ -1,4 +1,6 @@
 .zig-cache/
-build/
+/build
+!external/build
 zig-out/
 nri/
+build.exe

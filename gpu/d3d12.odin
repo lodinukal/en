@@ -10,7 +10,6 @@ import "core:strings"
 import "core:sync"
 
 import win32 "core:sys/windows"
-import "vendor:directx/d3d11"
 import "vendor:directx/d3d12"
 import "vendor:directx/dxgi"
 
@@ -31,7 +30,7 @@ set_debug_name :: proc(obj: ^d3d12.IObject, name: string) -> (error: mem.Allocat
 		name_wide,
 	)
 	obj->SetPrivateData(
-		d3d11.WKPDID_D3DDebugObjectNameW_UUID,
+		d3d12.WKPDID_D3DDebugObjectNameW_UUID,
 		u32(name_wide),
 		raw_data(name_buffer),
 	)
@@ -361,7 +360,7 @@ destroy_device :: proc(instance: ^Instance, device: ^Device) {
 		}
 	}
 
-	d.allocator->Release()
+	d3d12ma.Allocator_Release(d.allocator)
 	d.device->Release()
 	d.adapter->Release()
 	free(device)
@@ -565,7 +564,7 @@ submit :: proc(instance: ^Instance, queue: ^Command_Queue, buffers: []^Command_B
 
 	queue.queue->ExecuteCommandLists(
 		u32(small_array.len(command_lists)),
-		(^^d3d12.ICommandList)(raw_data(small_array.slice(&command_lists))),
+		auto_cast raw_data(small_array.slice(&command_lists)),
 	)
 }
 
@@ -1542,8 +1541,8 @@ create_swapchain :: proc(
 	}
 
 	swap_chain_desc: dxgi.SWAP_CHAIN_DESC1
-	swap_chain_desc.Width = u32(desc.width)
-	swap_chain_desc.Height = u32(desc.height)
+	swap_chain_desc.Width = u32(desc.size.x)
+	swap_chain_desc.Height = u32(desc.size.y)
 	swap_chain_desc.Format = SWAPCHAIN_FORMAT[desc.format]
 	swap_chain_desc.Stereo = false
 	swap_chain_desc.SampleDesc.Count = 1
@@ -2010,7 +2009,7 @@ texture_from_resource :: proc(resource: ^d3d12.IResource) -> ^Texture {
 destroy_texture :: proc(instance: ^Instance, texture: ^Texture) {
 	t: ^D3D12_Texture = (^D3D12_Texture)(texture)
 	if t.allocation != nil {
-		t.allocation->Release()
+		d3d12ma.Allocation_Release(t.allocation)
 	}
 	if t.resource != nil {
 		t.resource->Release()
