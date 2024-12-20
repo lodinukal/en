@@ -1554,7 +1554,7 @@ create_swapchain :: proc(
 
 	if tearing_support {
 		swap_chain_desc.Flags += {.ALLOW_TEARING}
-		if desc.vsync_interval > 0 {
+		if desc.vsync_interval == 0 {
 			swapchain.present_flags += {.ALLOW_TEARING}
 		}
 	}
@@ -1583,11 +1583,27 @@ create_swapchain :: proc(
 	}
 
 	assert(desc.texture_num <= MAX_SWAPCHAIN_TEXTURES)
-	small_array.resize(&swapchain.textures, int(desc.texture_num))
+	acquire_swapchain_textures(i, swapchain)
+
+	out_swapchain = (^Swapchain)(swapchain)
+	return
+}
+
+acquire_swapchain_textures :: proc(
+	instance: ^D3D12_Instance,
+	swapchain: ^D3D12_Swapchain,
+) -> (
+	error: Error,
+) {
+
+	small_array.resize(&swapchain.textures, int(swapchain.desc.texture_num))
 	for &texture, index in small_array.slice(&swapchain.textures) {
 		resource: ^d3d12.IResource
-		hr =
-		swapchain.swap_chain->GetBuffer(u32(index), d3d12.IResource_UUID, (^rawptr)(&resource))
+		hr := swapchain.swap_chain->GetBuffer(
+			u32(index),
+			d3d12.IResource_UUID,
+			(^rawptr)(&resource),
+		)
 		if !win32.SUCCEEDED(hr) {
 			error = .Unknown
 			log.debug("Failed to get swapchain buffer", hr)
@@ -1596,16 +1612,20 @@ create_swapchain :: proc(
 		texture = texture_from_resource(resource)
 	}
 
-	out_swapchain = (^Swapchain)(swapchain)
 	return
+}
+
+release_swapchain_textures :: proc(instance: ^D3D12_Instance, swapchain: ^D3D12_Swapchain) {
+	s: ^D3D12_Swapchain = swapchain
+	for texture in small_array.slice(&s.textures) {
+		instance->destroy_texture(texture)
+	}
 }
 
 destroy_swapchain :: proc(instance: ^Instance, swapchain: ^Swapchain) {
 	i: ^D3D12_Instance = (^D3D12_Instance)(instance)
 	s: ^D3D12_Swapchain = (^D3D12_Swapchain)(swapchain)
-	for texture in small_array.slice(&s.textures) {
-		i->destroy_texture(texture)
-	}
+	release_swapchain_textures(i, s)
 
 	s.swap_chain->Release()
 	free(s)
@@ -1641,7 +1661,7 @@ acquire_next_texture :: proc(instance: ^Instance, swapchain: ^Swapchain) -> u32 
 
 present :: proc(instance: ^Instance, swapchain: ^Swapchain) -> Error {
 	s: ^D3D12_Swapchain = (^D3D12_Swapchain)(swapchain)
-	hr := s.swap_chain->Present(1, s.present_flags)
+	hr := s.swap_chain->Present(u32(s.desc.vsync_interval), s.present_flags)
 	return .Success if win32.SUCCEEDED(hr) else .Unknown
 }
 
@@ -1651,7 +1671,9 @@ resize_swapchain :: proc(
 	width: dim,
 	height: dim,
 ) -> Error {
+	i: ^D3D12_Instance = (^D3D12_Instance)(instance)
 	s: ^D3D12_Swapchain = (^D3D12_Swapchain)(swapchain)
+	release_swapchain_textures(i, s)
 	hr := s.swap_chain->ResizeBuffers(
 		0,
 		u32(width),
@@ -1659,7 +1681,12 @@ resize_swapchain :: proc(
 		SWAPCHAIN_FORMAT[s.desc.format],
 		s.create_flags,
 	)
-	return .Success if win32.SUCCEEDED(hr) else .Unknown
+	if !win32.SUCCEEDED(hr) {
+		log.debug("Failed to resize swapchain", hr)
+		return .Unknown
+	}
+	acquire_swapchain_textures(i, s)
+	return .Success
 }
 
 D3D12_Texture :: struct {

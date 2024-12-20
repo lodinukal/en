@@ -66,6 +66,7 @@ init_renderer :: proc(ren: ^Renderer) -> (ok: bool) {
 				x11 = {window = rawptr(sys_info.info.x11.window)},
 				wayland = {surface = sys_info.info.wl.surface},
 			},
+			vsync_interval = 0,
 		},
 	)
 	check_gpu(gpu_err, "Could not create swapchain") or_return

@@ -32,31 +32,34 @@ main :: proc() {
 	if !init_renderer(&ren) do return
 	defer destroy_renderer(&ren)
 
-	session := create_global_session()
-	if session == nil do return
-	defer destroy_global_session(session)
+	// session, slang_ok := create_global_session()
+	// if !slang_ok {
+	// 	log.errorf("Could not create global session")
+	// 	return
+	// }
+	// defer destroy_global_session(session)
 
-	forward_compiled, ok_forward := compile_shader(
-		session,
-		"assets/forward.slang",
-		{.Vertex_Shader, .Fragment_Shader},
-		allocator = context.temp_allocator,
-	)
-	if !ok_forward {
-		log.errorf("Could not compile shader")
-		return
-	}
+	// forward_compiled, ok_forward := compile_shader(
+	// 	session,
+	// 	"assets/forward.slang",
+	// 	{.Vertex_Shader, .Fragment_Shader},
+	// 	allocator = context.temp_allocator,
+	// )
+	// if !ok_forward {
+	// 	log.errorf("Could not compile shader")
+	// 	return
+	// }
 
-	emit_draws_compiled, ok_emit_draws := compile_shader(
-		session,
-		"assets/emit_draws.slang",
-		{.Compute_Shader},
-		allocator = context.temp_allocator,
-	)
-	if !ok_emit_draws {
-		log.errorf("Could not compile shader")
-		return
-	}
+	// emit_draws_compiled, ok_emit_draws := compile_shader(
+	// 	session,
+	// 	"assets/emit_draws.slang",
+	// 	{.Compute_Shader},
+	// 	allocator = context.temp_allocator,
+	// )
+	// if !ok_emit_draws {
+	// 	log.errorf("Could not compile shader")
+	// 	return
+	// }
 
 	running := true
 	is_fullscreen := false

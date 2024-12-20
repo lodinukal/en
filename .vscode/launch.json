@@ -14,18 +14,6 @@
       "cwd": "${workspaceFolder}",
       "environment": [],
       "console": "externalTerminal"
-    },
-    {
-      "name": "D3D12MA",
-      "type": "cppvsdbg",
-      "request": "launch",
-      "program": "${workspaceFolder}/d3d12ma/example/example.exe",
-      "args": [],
-      "stopAtEntry": false,
-      "cwd": "${workspaceFolder}",
-      "environment": [],
-      "console": "externalTerminal",
-      "symbolSearchPath": "${workspaceFolder}/d3d12ma/lib"
     }
   ]
 }

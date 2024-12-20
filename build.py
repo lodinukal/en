@@ -194,20 +194,33 @@ class Builder:
             print(f"Cannot run a {self.mode.name}.")
 
 
+def exists(path: str) -> bool:
+    import os
+
+    return os.path.exists(path)
+
+
+def copy_file_if_not_exists(src: str, dst: str):
+    import os
+
+    if not exists(dst):
+        shutil.copyfile(src, dst)
+        os.fsync(dst)
+
+
 def build_app(debug=False):
     shutil.copytree("assets", "build/assets", dirs_exist_ok=True)
-    shutil.copyfile(
+    copy_file_if_not_exists(
         "external/slang/slang/bin/slang.dll",
         "build/slang.dll",
     )
-    shutil.copyfile(get_vendor_path("SDL2/SDL2.dll"), "build/SDL2.dll")
+    copy_file_if_not_exists(get_vendor_path("SDL2/SDL2.dll"), "build/SDL2.dll")
 
     # build("app", {"en": ".", "external": "external"}, debug=debug)
     opts = Builder()
     opts.proj = "app"
     opts.collections["en"] = "."
     opts.collections["external"] = "external"
-    opts.defines["slang_linked"] = True
     opts.debug = debug
     opts.build()
     return opts

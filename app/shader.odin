@@ -1,15 +1,13 @@
 package app
 
 import "core:container/small_array"
+import "core:dynlib"
 import "core:log"
 import "core:mem"
 import "core:slice"
 import sp "external:slang/slang"
 
 import "en:gpu"
-
-@(private = "file")
-LINKED :: #config(slang_linked, false)
 
 slang_check :: #force_inline proc(#any_int result: int, loc := #caller_location) {
 	result := -sp.Result(result)
@@ -64,19 +62,37 @@ diagnostics_check :: #force_inline proc(diagnostics: ^sp.IBlob, loc := #caller_l
 	}
 }
 
-create_global_session :: proc() -> ^sp.IGlobalSession {
-	when !LINKED {
-		log.errorf("Slang is not linked")
-		return nil
+@(private = "file")
+loaded: dynlib.Library
+
+@(private = "file")
+sp_createGlobalSession: proc "c" (
+	apiVersion: sp.Int,
+	outGlobalSession: ^^sp.IGlobalSession,
+) -> sp.Result
+@(private = "file")
+sp_shutdown: proc "c" ()
+
+create_global_session :: proc() -> (session: ^sp.IGlobalSession, ok: bool = true) {
+	// attempt to load
+	if loaded == nil {
+		loaded = dynlib.load_library("slang.dll") or_return
+		sp_createGlobalSession =
+		auto_cast dynlib.symbol_address(loaded, "slang_createGlobalSession") or_return
+		sp_shutdown = auto_cast dynlib.symbol_address(loaded, "slang_shutdown") or_return
 	}
-	using sp
-	session: ^IGlobalSession
-	slang_check(sp.createGlobalSession(sp.API_VERSION, &session))
-	return session
+	slang_check(sp_createGlobalSession(sp.API_VERSION, &session))
+	return
 }
 
 destroy_global_session :: proc(global_session: ^sp.IGlobalSession) {
+	if global_session == nil do return
 	global_session->release()
+	if loaded != nil {
+		sp_shutdown()
+		dynlib.unload_library(loaded)
+		loaded = nil
+	}
 }
 
 Shader_Stage :: enum {
@@ -100,6 +116,11 @@ compile_shader :: proc(
 	result: [Shader_Stage][]u8,
 	ok: bool = true,
 ) {
+	if global_session == nil {
+		log.errorf("No global session")
+		ok = false
+		return
+	}
 	using sp
 	code, diagnostics: ^IBlob
 	r: Result
