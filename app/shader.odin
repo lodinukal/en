@@ -110,10 +110,9 @@ compile_shader :: proc(
 	global_session: ^sp.IGlobalSession,
 	path: cstring,
 	stages: gpu.Stage_Flags,
-	target: Target = .DXIL,
 	allocator := context.allocator,
 ) -> (
-	result: [Shader_Stage][]u8,
+	result: [Shader_Stage][Target][]u8,
 	ok: bool = true,
 ) {
 	if global_session == nil {
@@ -193,38 +192,43 @@ compile_shader :: proc(
 		return
 	}
 
-	for &output, stage in result {
-		if components[stage] == nil do continue
-		link_components := [2]^IComponentType{components[stage], module}
+	for &output_set, stage in result {
+		for &output, target in output_set {
+			if components[stage] == nil do continue
+			link_components := [2]^IComponentType{components[stage], module}
 
-		linked_program: ^IComponentType
-		r =
-		session->createCompositeComponentType(
-			raw_data(link_components[:]),
-			2,
-			&linked_program,
-			&diagnostics,
-		)
-		diagnostics_check(diagnostics)
-		slang_check(r)
+			linked_program: ^IComponentType
+			r =
+			session->createCompositeComponentType(
+				raw_data(link_components[:]),
+				2,
+				&linked_program,
+				&diagnostics,
+			)
+			diagnostics_check(diagnostics)
+			slang_check(r)
 
-		target_code: ^IBlob
-		r = linked_program->getTargetCode(int(target), &target_code, &diagnostics)
-		diagnostics_check(diagnostics)
-		slang_check(r)
+			target_code: ^IBlob
+			r = linked_program->getTargetCode(int(target), &target_code, &diagnostics)
+			diagnostics_check(diagnostics)
+			slang_check(r)
 
-		code_size := target_code->getBufferSize()
-		source_code := slice.from_ptr((^u8)(target_code->getBufferPointer()), auto_cast code_size)
+			code_size := target_code->getBufferSize()
+			source_code := slice.from_ptr(
+				(^u8)(target_code->getBufferPointer()),
+				auto_cast code_size,
+			)
 
-		error: mem.Allocator_Error
-		output, error = make([]u8, code_size, allocator)
-		if error != nil {
-			log.errorf("Failed to allocate memory for shader code")
-			ok = false
-			return
+			error: mem.Allocator_Error
+			output, error = make([]u8, code_size, allocator)
+			if error != nil {
+				log.errorf("Failed to allocate memory for shader code")
+				ok = false
+				return
+			}
+
+			copy_slice(output, source_code)
 		}
-
-		copy_slice(output, source_code)
 	}
 
 
