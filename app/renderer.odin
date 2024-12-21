@@ -66,7 +66,7 @@ init_renderer :: proc(ren: ^Renderer) -> (ok: bool) {
 				x11 = {window = rawptr(sys_info.info.x11.window)},
 				wayland = {surface = sys_info.info.wl.surface},
 			},
-			vsync_interval = 0,
+			immediate = true,
 		},
 	)
 	check_gpu(gpu_err, "Could not create swapchain") or_return
@@ -82,7 +82,11 @@ renderer_wait_idle :: proc(ren: ^Renderer) {
 renderer_resize :: proc(ren: ^Renderer, size: [2]c.int) {
 	renderer_wait_idle(ren)
 	ren.window_size = size
-	ren.instance->resize_swapchain(ren.swapchain, auto_cast size.x, auto_cast size.y)
+	result := ren.instance->resize_swapchain(ren.swapchain, auto_cast size.x, auto_cast size.y)
+	if result != nil {
+		log.errorf("Could not resize swapchain: {}", result)
+		return
+	}
 }
 
 destroy_renderer :: proc(ren: ^Renderer) {
@@ -93,16 +97,21 @@ destroy_renderer :: proc(ren: ^Renderer) {
 	ren.instance->destroy()
 }
 
-begin_rendering :: proc(ren: ^Renderer) {
+begin_rendering :: proc(ren: ^Renderer) -> (ok: bool = true) {
 	if ren.frame_index >= FRAME_BUF_NUM {
-		ren.instance->wait_fence_now(ren.main_fence, 1 + ren.frame_index - FRAME_BUF_NUM)
+		result := ren.instance->wait_fence_now(ren.main_fence, 1 + ren.frame_index - FRAME_BUF_NUM)
+		check_gpu(result, "Could not wait for fence") or_return
 	}
+	return
 }
 // rendering logic between begin_rendering and end_rendering
-end_rendering :: proc(ren: ^Renderer) {
-	ren.instance->present(ren.swapchain)
+end_rendering :: proc(ren: ^Renderer) -> (ok: bool = true) {
+	result := ren.instance->present(ren.swapchain)
+	check_gpu(result, "Could not present swapchain") or_return
 	ren.frame_index += 1
-	ren.instance->signal_fence(ren.graphics_queue, ren.main_fence, ren.frame_index)
+	result = ren.instance->signal_fence(ren.graphics_queue, ren.main_fence, ren.frame_index)
+	check_gpu(result, "Could not signal fence") or_return
+	return
 }
 
 @(private = "file")

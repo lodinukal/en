@@ -115,6 +115,8 @@ create_d3d12_instance :: proc(
 		) {
 			debug_controller->EnableDebugLayer()
 			defer debug_controller->Release()
+		} else {
+			log.errorf("Could not enable debug layer")
 		}
 	}
 
@@ -310,13 +312,14 @@ create_device :: proc(
 	}
 
 	if desc.enable_graphics_api_validation {
-		info_queue: ^d3d12.IInfoQueue
-		hr = device.device->QueryInterface(d3d12.IInfoQueue_UUID, (^rawptr)(&info_queue))
+		info_queue: ^d3d12.IInfoQueue1
+		hr = device.device->QueryInterface(d3d12.IInfoQueue1_UUID, (^rawptr)(&info_queue))
 		if win32.SUCCEEDED(hr) {
 			defer info_queue->Release()
 
 			info_queue->SetBreakOnSeverity(.CORRUPTION, true)
 			info_queue->SetBreakOnSeverity(.ERROR, true)
+			info_queue->SetBreakOnSeverity(.WARNING, true)
 			disable_ids := [?]d3d12.MESSAGE_ID {
 				.CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE,
 				.COMMAND_LIST_STATIC_DESCRIPTOR_RESOURCE_DIMENSION_MISMATCH,
@@ -326,6 +329,24 @@ create_device :: proc(
 			filter.DenyList.pIDList = raw_data(disable_ids[:])
 			filter.DenyList.NumIDs = len(disable_ids)
 			info_queue->AddStorageFilterEntries(&filter)
+
+			info_queue->RegisterMessageCallback(
+				proc "c" (
+					category: d3d12.MESSAGE_CATEGORY,
+					severity: d3d12.MESSAGE_SEVERITY,
+					id: d3d12.MESSAGE_ID,
+					msg: cstring,
+					callback_cookier: rawptr,
+				) {
+					context = runtime.default_context()
+					log.errorf("DX12: {} {} {} {}", category, severity, id, msg)
+				},
+				{.IGNORE_FILTERS},
+				nil,
+				nil,
+			)
+		} else {
+			log.errorf("Could not create info queue")
 		}
 	}
 
@@ -1496,6 +1517,7 @@ D3D12_Swapchain :: struct {
 	desc:          Swapchain_Desc,
 	textures:      small_array.Small_Array(MAX_SWAPCHAIN_TEXTURES, ^Texture),
 	create_flags:  dxgi.SWAP_CHAIN,
+	sync_interval: u32,
 	present_flags: dxgi.PRESENT,
 }
 
@@ -1530,11 +1552,11 @@ create_swapchain :: proc(
 	}
 	swapchain.desc = desc
 
-	tearing_support := false
+	tearing_support: win32.BOOL = false
 	hr := i.factory->CheckFeatureSupport(
 		.PRESENT_ALLOW_TEARING,
 		&tearing_support,
-		u32(size_of(u32)),
+		u32(size_of(tearing_support)),
 	)
 	if !win32.SUCCEEDED(hr) {
 		tearing_support = false
@@ -1554,9 +1576,10 @@ create_swapchain :: proc(
 
 	if tearing_support {
 		swap_chain_desc.Flags += {.ALLOW_TEARING}
-		if desc.vsync_interval == 0 {
-			swapchain.present_flags += {.ALLOW_TEARING}
-		}
+	}
+	swapchain.sync_interval = 0 if desc.immediate else 1
+	if desc.immediate && tearing_support {
+		swapchain.present_flags += {.ALLOW_TEARING}
 	}
 
 	swapchain.create_flags = swap_chain_desc.Flags
@@ -1577,7 +1600,7 @@ create_swapchain :: proc(
 		(^^dxgi.ISwapChain1)(&swapchain.swap_chain),
 	)
 	if !win32.SUCCEEDED(hr) {
-		log.debug("Failed to create swapchain for hwnd %s", hr)
+		log.errorf("Failed to create swapchain for hwnd %s", hr)
 		error = .Unknown
 		return
 	}
@@ -1606,7 +1629,7 @@ acquire_swapchain_textures :: proc(
 		)
 		if !win32.SUCCEEDED(hr) {
 			error = .Unknown
-			log.debug("Failed to get swapchain buffer", hr)
+			log.errorf("Failed to get swapchain buffer %d", hr)
 			return
 		}
 		texture = texture_from_resource(resource)
@@ -1659,10 +1682,14 @@ acquire_next_texture :: proc(instance: ^Instance, swapchain: ^Swapchain) -> u32 
 	return s.swap_chain->GetCurrentBackBufferIndex()
 }
 
-present :: proc(instance: ^Instance, swapchain: ^Swapchain) -> Error {
+present :: proc(instance: ^Instance, swapchain: ^Swapchain) -> (error: Error) {
 	s: ^D3D12_Swapchain = (^D3D12_Swapchain)(swapchain)
-	hr := s.swap_chain->Present(u32(s.desc.vsync_interval), s.present_flags)
-	return .Success if win32.SUCCEEDED(hr) else .Unknown
+	hr := s.swap_chain->Present(s.sync_interval, s.present_flags)
+	if !win32.SUCCEEDED(hr) {
+		log.errorf("Failed to present swapchain %d", hr)
+		error = .Unknown
+	}
+	return
 }
 
 resize_swapchain :: proc(
@@ -1682,7 +1709,7 @@ resize_swapchain :: proc(
 		s.create_flags,
 	)
 	if !win32.SUCCEEDED(hr) {
-		log.debug("Failed to resize swapchain", hr)
+		log.errorf("Failed to resize swapchain %d", hr)
 		return .Unknown
 	}
 	acquire_swapchain_textures(i, s)

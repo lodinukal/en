@@ -9,22 +9,18 @@ struct VertexStageOutput
     nointerpolation uint material_id : MATERIAL;
     nointerpolation uint instance_id : INSTANCE;
     float4 sv_position : SV_POSITION;
-}
+};
 
-struct Uniforms
+DECLAREC(Constants, 0)
 {
     column_major float4x4 view;
     column_major float4x4 projection;
 }
-[vk_push_constant]
-Uniforms uniforms : register(b0, space0);
 
-StructuredBuffer<Material> materials : register(t0, space1);
-
-SamplerState sampler : register(s0, space2);
-Texture2D textures[] : register(t1, space2);
-
-StructuredBuffer<Instance> instances : register(t0, space3);
+DECLARET(StructuredBuffer<Material>, materials, 0, 1);
+DECLARES(SamplerState, sampler, 0, 2);
+DECLARET(Texture2D, textures[], 1, 2);
+DECLARET(StructuredBuffer<Instance>, instances, 0, 3);
 
 [shader("vertex")]
 VertexStageOutput vs_main(Vertex input, DECLARE_DRAW_PARAMETERS)
@@ -32,7 +28,7 @@ VertexStageOutput vs_main(Vertex input, DECLARE_DRAW_PARAMETERS)
     Instance instance = instances[INSTANCE_ID];
 
     float4x4 world = instance.transform;
-    world = mul(mul(uniforms.projection, uniforms.view), world);
+    world = mul(mul(projection, view), world);
 
     float4 position = float4(input.position, 1.0);
     position = mul(world, position);

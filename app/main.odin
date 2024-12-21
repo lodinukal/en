@@ -32,34 +32,36 @@ main :: proc() {
 	if !init_renderer(&ren) do return
 	defer destroy_renderer(&ren)
 
-	// session, slang_ok := create_global_session()
-	// if !slang_ok {
-	// 	log.errorf("Could not create global session")
-	// 	return
-	// }
-	// defer destroy_global_session(session)
+	session, slang_ok := create_global_session()
+	if !slang_ok {
+		log.errorf("Could not create global session")
+		return
+	}
+	defer destroy_global_session(session)
 
-	// forward_compiled, ok_forward := compile_shader(
-	// 	session,
-	// 	"assets/forward.slang",
-	// 	{.Vertex_Shader, .Fragment_Shader},
-	// 	allocator = context.temp_allocator,
-	// )
-	// if !ok_forward {
-	// 	log.errorf("Could not compile shader")
-	// 	return
-	// }
+	forward_compiled, ok_forward := compile_shader(
+		session,
+		"assets/forward.slang",
+		{.Vertex_Shader, .Fragment_Shader},
+		allocator = context.temp_allocator,
+	)
+	if !ok_forward {
+		log.errorf("Could not compile shader")
+		return
+	}
+	log_shader(forward_compiled)
 
-	// emit_draws_compiled, ok_emit_draws := compile_shader(
-	// 	session,
-	// 	"assets/emit_draws.slang",
-	// 	{.Compute_Shader},
-	// 	allocator = context.temp_allocator,
-	// )
-	// if !ok_emit_draws {
-	// 	log.errorf("Could not compile shader")
-	// 	return
-	// }
+	emit_draws_compiled, ok_emit_draws := compile_shader(
+		session,
+		"assets/emit_draws.slang",
+		{.Compute_Shader},
+		allocator = context.temp_allocator,
+	)
+	if !ok_emit_draws {
+		log.errorf("Could not compile shader")
+		return
+	}
+	log_shader(emit_draws_compiled)
 
 	running := true
 	is_fullscreen := false
@@ -86,7 +88,16 @@ main :: proc() {
 				}
 			}
 		}
-		begin_rendering(&ren)
+		begin_rendering(&ren) or_break
 		defer end_rendering(&ren)
+	}
+}
+
+log_shader :: proc(shaders: [Shader_Stage][Target][]u8) {
+	for target_set, stage in shaders {
+		for code, target in target_set {
+			if len(code) == 0 do continue
+			log.infof("Shader stage: {} {} {}", target, stage, len(code))
+		}
 	}
 }

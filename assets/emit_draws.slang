@@ -1,16 +1,14 @@
 #include "common.slang"
 
-[vk_push_constant]
-cbuffer Constants : register(b0, space0)
+DECLAREC(Constants, 0)
 {
-    uint32_t instance_count;
-};
+    uint instance_count;
+}
 
-StructuredBuffer<MeshInfo> meshes : register(t0, space1);
-StructuredBuffer<Instance> instances : register(t0, space2);
-
-RWBuffer<uint> cmd_buffer : register(u0, space3);
-RWBuffer<uint> Readback : register(u1, space3);
+DECLARET(StructuredBuffer<MeshInfo>, meshes, 0, 1);
+DECLARET(StructuredBuffer<Instance>, instances, 0, 2);
+DECLARET(RWBuffer<uint>, cmd_buffer, 0, 3);
+DECLARET(RWBuffer<uint>, readback, 1, 3);
 
 groupshared uint shared_draw_count;
 
@@ -45,6 +43,6 @@ void cs_main(uint thread_id: SV_DispatchThreadId)
 
     if (thread_id == 0)
     {
-        Readback[0] = shared_draw_count;
+        readback[0] = shared_draw_count;
     }
 }
