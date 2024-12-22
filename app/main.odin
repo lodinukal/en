@@ -1,7 +1,10 @@
 package app
 
+import "core:bufio"
 import "core:c"
+import "core:encoding/cbor"
 import "core:fmt"
+import "core:io"
 import "core:log"
 import "core:os"
 
@@ -62,6 +65,49 @@ main :: proc() {
 		return
 	}
 	log_shader(emit_draws_compiled)
+
+	forward_file, forward_err := os.open("forward.enshader", os.O_RDWR | os.O_CREATE | os.O_TRUNC)
+	if forward_err != nil {
+		log.errorf("Could not open file: {}", forward_err)
+		return
+	}
+	defer os.close(forward_file)
+
+	stream := os.stream_from_handle(forward_file)
+	w := io.to_writer(stream)
+
+	marshal_err := cbor.marshal_into_writer(
+		w,
+		forward_compiled,
+		flags = cbor.ENCODE_FULLY_DETERMINISTIC,
+	)
+	if marshal_err != nil {
+		log.errorf("Could not marshal: {}", marshal_err)
+		return
+	}
+
+	emit_draws_file, emit_draws_err := os.open(
+		"emit_draws.enshader",
+		os.O_RDWR | os.O_CREATE | os.O_TRUNC,
+	)
+	if emit_draws_err != nil {
+		log.errorf("Could not open file: {}", emit_draws_err)
+		return
+	}
+	defer os.close(emit_draws_file)
+
+	stream = os.stream_from_handle(emit_draws_file)
+	w = io.to_writer(stream)
+
+	marshal_err = cbor.marshal_into_writer(
+		w,
+		emit_draws_compiled,
+		flags = cbor.ENCODE_FULLY_DETERMINISTIC,
+	)
+	if marshal_err != nil {
+		log.errorf("Could not marshal: {}", marshal_err)
+		return
+	}
 
 	running := true
 	is_fullscreen := false
