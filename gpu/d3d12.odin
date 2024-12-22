@@ -55,6 +55,8 @@ create_d3d12_instance :: proc(
 		return
 	}
 
+	instance.api = .D3D12
+
 	// fill functions
 	instance.destroy = destroy_instance
 
@@ -63,6 +65,20 @@ create_d3d12_instance :: proc(
 	instance.get_device_desc = get_device_desc
 	instance.set_device_debug_name = set_device_debug_name
 	instance.get_command_queue = get_command_queue
+
+	instance.create_buffer = create_buffer
+	instance.destroy_buffer = destroy_buffer
+	instance.set_buffer_debug_name = set_buffer_debug_name
+	instance.map_buffer = map_buffer
+	instance.unmap_buffer = unmap_buffer
+
+	instance.create_1d_texture_view = create_1d_texture_view
+	instance.create_2d_texture_view = create_2d_texture_view
+	instance.create_3d_texture_view = create_3d_texture_view
+	instance.create_buffer_view = create_buffer_view
+	instance.create_sampler = create_sampler
+	instance.destroy_descriptor = destroy_descriptor
+	instance.set_descriptor_debug_name = set_descriptor_debug_name
 
 	instance.create_command_allocator = create_command_allocator
 	instance.destroy_command_allocator = destroy_command_allocator
@@ -147,14 +163,136 @@ D3D12_Device :: struct {
 	allocator:        ^d3d12ma.Allocator,
 	adapter:          ^dxgi.IAdapter1,
 	queues:           [Command_Queue_Type]^Command_Queue,
-	heaps:            [d3d12.DESCRIPTOR_HEAP_TYPE][dynamic]D3D12_Staging_Heap,
+	heaps:            [dynamic]D3D12_Staging_Heap,
 	free_descriptors: [d3d12.DESCRIPTOR_HEAP_TYPE][dynamic]D3D12_CPU_Descriptor_Handle,
 }
 
+D3D12_Buffer :: struct {
+	using _:    Buffer,
+	desc:       Buffer_Desc,
+	resource:   ^d3d12.IResource,
+	allocation: ^d3d12ma.Allocation,
+}
 
-D3D12_CPU_Descriptor_Handle :: struct {
-	heap_index: uint,
-	offset:     u32,
+create_buffer :: proc(
+	instance: ^Instance,
+	device: ^Device,
+	#by_ptr desc: Buffer_Desc,
+) -> (
+	out_buffer: ^Buffer,
+	error: Error,
+) {
+	d: ^D3D12_Device = (^D3D12_Device)(device)
+	buffer, alloc_err := new(D3D12_Buffer)
+	if alloc_err != nil {
+		error = .Out_Of_Memory
+		return
+	}
+
+	buffer.desc = desc
+	resource_desc: d3d12.RESOURCE_DESC
+	resource_desc.Dimension = .BUFFER
+	resource_desc.Width = desc.size
+	resource_desc.Height = 1
+	resource_desc.DepthOrArraySize = 1
+	resource_desc.MipLevels = 1
+	resource_desc.SampleDesc.Count = 1
+	resource_desc.Layout = .ROW_MAJOR
+	if card(
+		   desc.usage &
+		   {.Shader_Resource_Storage, .Acceleration_Structure_Storage, .Scratch_Buffer},
+	   ) >
+	   0 {
+		resource_desc.Flags = {.ALLOW_UNORDERED_ACCESS}
+	}
+
+	initial_state: d3d12.RESOURCE_STATES
+	if desc.location == .Host_Upload {
+		initial_state += d3d12.RESOURCE_STATE_GENERIC_READ
+	} else if desc.location == .Host_Readback {
+		initial_state += {.COPY_DEST}
+	}
+	if .Acceleration_Structure_Storage in desc.usage {
+		initial_state += {.RAYTRACING_ACCELERATION_STRUCTURE}
+	}
+
+	alloc_info: d3d12ma.ALLOCATION_DESC
+	alloc_info.HeapType = MEMORY_LOCATION_TO_HEAP_TYPE[desc.location]
+	alloc_info.Flags = {.STRATEGY_MIN_MEMORY}
+	alloc_info.ExtraHeapFlags = {.CREATE_NOT_ZEROED}
+
+	hr := d3d12ma.Allocator_CreateResource(
+		d.allocator,
+		alloc_info,
+		resource_desc,
+		{},
+		nil,
+		&buffer.allocation,
+		d3d12.IResource_UUID,
+		(^rawptr)(&buffer.resource),
+	)
+	if !win32.SUCCEEDED(hr) {
+		error = .Unknown
+		return
+	}
+
+	out_buffer = (^Buffer)(buffer)
+	return
+}
+
+destroy_buffer :: proc(instance: ^Instance, buffer: ^Buffer) {
+	b: ^D3D12_Buffer = (^D3D12_Buffer)(buffer)
+	b.resource->Release()
+	d3d12ma.Allocation_Release(b.allocation)
+	free(b)
+}
+
+set_buffer_debug_name :: proc(
+	instance: ^Instance,
+	buffer: ^Buffer,
+	name: string,
+) -> (
+	error: mem.Allocator_Error,
+) {
+	b: ^D3D12_Buffer = (^D3D12_Buffer)(buffer)
+	return set_debug_name(b.resource, name)
+}
+
+map_buffer :: proc(
+	instance: ^Instance,
+	buffer: ^Buffer,
+	offset: u64,
+	size: u64,
+) -> (
+	mapped_memory: []u8,
+	error: Error,
+) {
+	b: ^D3D12_Buffer = (^D3D12_Buffer)(buffer)
+	data: [^]u8
+	range := d3d12.RANGE {
+		Begin = uint(offset),
+		End   = uint(offset + size),
+	}
+	hr := b.resource->Map(0, &range, (^rawptr)(&data))
+	if !win32.SUCCEEDED(hr) {
+		log.errorf("Failed to map buffer %d", hr)
+		error = .Unknown
+		return
+	}
+
+	mapped_memory = data[offset:offset + size]
+	return
+}
+
+unmap_buffer :: proc(instance: ^Instance, buffer: ^Buffer) {
+	b: ^D3D12_Buffer = (^D3D12_Buffer)(buffer)
+	b.resource->Unmap(0, nil)
+}
+
+D3D12_CPU_Descriptor_Handle :: bit_field u64 {
+	heap_index: u32                        | 28,
+	heap_type:  d3d12.DESCRIPTOR_HEAP_TYPE | 4,
+	offset:     u32                        | 32,
 }
 
 D3D12_Staging_Heap :: struct {
@@ -179,7 +317,7 @@ create_staging_heap :: proc(
 	error: Error,
 ) {
 	d: ^D3D12_Device = (^D3D12_Device)(device)
-	heap_index = len(d.heaps[type])
+	heap_index = len(d.heaps)
 	desc: d3d12.DESCRIPTOR_HEAP_DESC
 	desc.Type = type
 	desc.NumDescriptors = STAGING_HEAP_DESCRIPTOR_COUNTS[type]
@@ -206,12 +344,16 @@ create_staging_heap :: proc(
 	for i in 0 ..< desc.NumDescriptors {
 		append(
 			free_descriptors,
-			D3D12_CPU_Descriptor_Handle{heap_index = heap_index, offset = u32(i)},
+			D3D12_CPU_Descriptor_Handle {
+				heap_index = u32(heap_index),
+				heap_type = type,
+				offset = u32(i),
+			},
 		)
 	}
 
 	arg, alloc_err := append(
-		&d.heaps[type],
+		&d.heaps,
 		D3D12_Staging_Heap {
 			base_descriptor = base_descriptor.ptr,
 			descriptor_size = descriptor_size,
@@ -251,16 +393,25 @@ allocate_cpu_descriptor :: proc(
 	return
 }
 
-free_cpu_descriptor :: proc(
-	device: ^Device,
-	type: d3d12.DESCRIPTOR_HEAP_TYPE,
-	handle: D3D12_CPU_Descriptor_Handle,
-) {
+free_cpu_descriptor :: proc(device: ^Device, handle: D3D12_CPU_Descriptor_Handle) {
 	d: ^D3D12_Device = (^D3D12_Device)(device)
+	type := handle.heap_type
 	_, error := append(&d.free_descriptors[type], handle)
 	if error != nil {
 		panic("Failed to free descriptor handle")
 	}
+}
+
+get_staging_descriptor_cpu_pointer :: proc(
+	device: ^Device,
+	handle: D3D12_CPU_Descriptor_Handle,
+) -> (
+	out_handle: d3d12.CPU_DESCRIPTOR_HANDLE,
+) {
+	d: ^D3D12_Device = (^D3D12_Device)(device)
+	heap := d.heaps[handle.heap_index]
+	out_handle.ptr = heap.base_descriptor + uint(handle.offset) * uint(heap.descriptor_size)
+	return
 }
 
 create_device :: proc(
@@ -360,7 +511,6 @@ create_device :: proc(
 		.MSAA_TEXTURES_ALWAYS_COMMITTED,
 		.DONT_PREFER_SMALL_BUFFERS_COMMITTED,
 	}
-	allocator_desc.PreferredBlockSize = 67108864 // 64MB
 
 	hr = d3d12ma.CreateAllocator(allocator_desc, &device.allocator)
 	if !win32.SUCCEEDED(hr) {
@@ -604,6 +754,635 @@ EN_TO_D3D12_DESCRIPTOR_TYPE := [Descriptor_Type]D3D12_Descriptor_Type {
 	.Structured_Buffer         = .Resource,
 	.Storage_Structured_Buffer = .Resource,
 	.Acceleration_Structure    = .Resource,
+}
+
+D3D12_Descriptor :: struct {
+	resource:            ^d3d12.IResource,
+	buffer_gpu_location: d3d12.GPU_VIRTUAL_ADDRESS,
+	// from below (see D3D12_Descriptor_Heap and D3D12_Descriptor_Pool)
+	cpu_descriptor:      d3d12.CPU_DESCRIPTOR_HANDLE,
+	handle:              D3D12_CPU_Descriptor_Handle,
+	heap_type:           d3d12.DESCRIPTOR_HEAP_TYPE,
+	buffer_view_type:    Buffer_View_Type,
+	integer_format:      bool,
+}
+
+SHADER_COMPONENT_MAPPING_ALWAYS_SET_BIT_AVOIDING_ZEROMEM_MISTAKES ::
+	1 << (d3d12.SHADER_COMPONENT_MAPPING_SHIFT * 4)
+ENCODE_SHADER_4_COMPONENT_MAPPING :: proc(
+	Src0, Src1, Src2, Src3: d3d12.SHADER_COMPONENT_MAPPING,
+) -> u32 {
+	return(
+		(u32(Src0) & d3d12.SHADER_COMPONENT_MAPPING_MASK) |
+		((u32(Src1) & d3d12.SHADER_COMPONENT_MAPPING_MASK) <<
+				d3d12.SHADER_COMPONENT_MAPPING_SHIFT) |
+		((u32(Src2) & d3d12.SHADER_COMPONENT_MAPPING_MASK) <<
+				(d3d12.SHADER_COMPONENT_MAPPING_SHIFT * 2)) |
+		((u32(Src3) & d3d12.SHADER_COMPONENT_MAPPING_MASK) <<
+				(d3d12.SHADER_COMPONENT_MAPPING_SHIFT * 3)) |
+		SHADER_COMPONENT_MAPPING_ALWAYS_SET_BIT_AVOIDING_ZEROMEM_MISTAKES \
+	)
+}
+DECODE_SHADER_4_COMPONENT_MAPPING :: proc(
+	ComponentToExtract, Mapping: u32,
+) -> d3d12.SHADER_COMPONENT_MAPPING {
+	return d3d12.SHADER_COMPONENT_MAPPING(
+		Mapping >>
+		(d3d12.SHADER_COMPONENT_MAPPING_SHIFT * ComponentToExtract) &
+		d3d12.SHADER_COMPONENT_MAPPING_MASK,
+	)
+}
+DEFAULT_SHADER_4_COMPONENT_MAPPING := ENCODE_SHADER_4_COMPONENT_MAPPING(
+	.FROM_MEMORY_COMPONENT_0,
+	.FROM_MEMORY_COMPONENT_1,
+	.FROM_MEMORY_COMPONENT_2,
+	.FROM_MEMORY_COMPONENT_3,
+)
+
+create_srv :: proc(
+	device: ^D3D12_Device,
+	descriptor: ^D3D12_Descriptor,
+	resource: ^d3d12.IResource,
+	desc: d3d12.SHADER_RESOURCE_VIEW_DESC,
+) -> (
+	error: Error,
+) {
+	desc := desc
+	out_handle := allocate_cpu_descriptor(device, .CBV_SRV_UAV) or_return
+	descriptor.handle = out_handle
+	descriptor.cpu_descriptor = get_staging_descriptor_cpu_pointer(device, out_handle)
+	descriptor.resource = resource
+	device.device->CreateShaderResourceView(resource, &desc, descriptor.cpu_descriptor)
+	return
+}
+
+create_uav :: proc(
+	device: ^D3D12_Device,
+	descriptor: ^D3D12_Descriptor,
+	resource: ^d3d12.IResource,
+	desc: d3d12.UNORDERED_ACCESS_VIEW_DESC,
+	format: Format,
+) -> (
+	error: Error,
+) {
+	desc := desc
+	out_handle := allocate_cpu_descriptor(device, .CBV_SRV_UAV) or_return
+	descriptor.handle = out_handle
+	descriptor.cpu_descriptor = get_staging_descriptor_cpu_pointer(device, out_handle)
+	descriptor.resource = resource
+	descriptor.integer_format = FORMAT_PROPS[format].is_integer
+	device.device->CreateUnorderedAccessView(resource, nil, &desc, descriptor.cpu_descriptor)
+	return
+}
+
+create_rtv :: proc(
+	device: ^D3D12_Device,
+	descriptor: ^D3D12_Descriptor,
+	resource: ^d3d12.IResource,
+	desc: d3d12.RENDER_TARGET_VIEW_DESC,
+) -> (
+	error: Error,
+) {
+	desc := desc
+	out_handle := allocate_cpu_descriptor(device, .RTV) or_return
+	descriptor.handle = out_handle
+	descriptor.cpu_descriptor = get_staging_descriptor_cpu_pointer(device, out_handle)
+	descriptor.resource = resource
+	device.device->CreateRenderTargetView(resource, &desc, descriptor.cpu_descriptor)
+	return
+}
+
+create_dsv :: proc(
+	device: ^D3D12_Device,
+	descriptor: ^D3D12_Descriptor,
+	resource: ^d3d12.IResource,
+	desc: d3d12.DEPTH_STENCIL_VIEW_DESC,
+) -> (
+	error: Error,
+) {
+	desc := desc
+	out_handle := allocate_cpu_descriptor(device, .DSV) or_return
+	descriptor.handle = out_handle
+	descriptor.cpu_descriptor = get_staging_descriptor_cpu_pointer(device, out_handle)
+	descriptor.resource = resource
+	device.device->CreateDepthStencilView(resource, &desc, descriptor.cpu_descriptor)
+	return
+}
+
+create_cbv :: proc(
+	device: ^D3D12_Device,
+	descriptor: ^D3D12_Descriptor,
+	resource: ^d3d12.IResource,
+	desc: d3d12.CONSTANT_BUFFER_VIEW_DESC,
+) -> (
+	error: Error,
+) {
+	desc := desc
+	out_handle := allocate_cpu_descriptor(device, .CBV_SRV_UAV) or_return
+	descriptor.handle = out_handle
+	descriptor.cpu_descriptor = get_staging_descriptor_cpu_pointer(device, out_handle)
+	descriptor.resource = resource
+	device.device->CreateConstantBufferView(&desc, descriptor.cpu_descriptor)
+	return
+}
+
+create_1d_texture_view :: proc(
+	instance: ^Instance,
+	device: ^Device,
+	#by_ptr desc: Texture_1D_View_Desc,
+) -> (
+	out_descriptor: ^Descriptor,
+	error: Error,
+) {
+	i: ^D3D12_Instance = (^D3D12_Instance)(instance)
+	d: ^D3D12_Device = (^D3D12_Device)(device)
+	t: ^D3D12_Texture = (^D3D12_Texture)(desc.texture)
+
+	descriptor, alloc_err := new(D3D12_Descriptor)
+	if alloc_err != nil {
+		error = .Out_Of_Memory
+		return
+	}
+
+	texture_desc := t.desc
+	remaining_mips :=
+		(texture_desc.mip_num - desc.mip_offset) if desc.mip_num == REMAINING_MIPS else desc.mip_num
+	remaining_layers :=
+		(texture_desc.layer_num - desc.layer_offset) if desc.layer_num == REMAINING_LAYERS else desc.layer_num
+
+	switch desc.view_type {
+	case .Shader_Resource:
+		srv_desc: d3d12.SHADER_RESOURCE_VIEW_DESC
+		srv_desc.Format = EN_TO_DXGI_FORMAT[texture_desc.format]
+		srv_desc.ViewDimension = .TEXTURE1D
+		srv_desc.Shader4ComponentMapping = DEFAULT_SHADER_4_COMPONENT_MAPPING
+		srv_desc.Texture1D.MostDetailedMip = u32(desc.mip_offset)
+		srv_desc.Texture1D.MipLevels = u32(remaining_mips)
+		create_srv(d, descriptor, t.resource, srv_desc) or_return
+		return
+	case .Shader_Resource_Array:
+		srv_desc: d3d12.SHADER_RESOURCE_VIEW_DESC
+		srv_desc.Format = EN_TO_DXGI_FORMAT[texture_desc.format]
+		srv_desc.ViewDimension = .TEXTURE1DARRAY
+		srv_desc.Shader4ComponentMapping = DEFAULT_SHADER_4_COMPONENT_MAPPING
+		srv_desc.Texture1DArray.MostDetailedMip = u32(desc.mip_offset)
+		srv_desc.Texture1DArray.MipLevels = u32(remaining_mips)
+		srv_desc.Texture1DArray.FirstArraySlice = u32(desc.layer_offset)
+		srv_desc.Texture1DArray.ArraySize = u32(remaining_layers)
+		create_srv(d, descriptor, t.resource, srv_desc) or_return
+		return
+	case .Shader_Resource_Storage:
+		uav_desc: d3d12.UNORDERED_ACCESS_VIEW_DESC
+		uav_desc.Format = EN_TO_DXGI_FORMAT[texture_desc.format]
+		uav_desc.ViewDimension = .TEXTURE1D
+		uav_desc.Texture1D.MipSlice = u32(desc.mip_offset)
+		create_uav(d, descriptor, t.resource, uav_desc, texture_desc.format) or_return
+		return
+	case .Shader_Resource_Storage_Array:
+		uav_desc: d3d12.UNORDERED_ACCESS_VIEW_DESC
+		uav_desc.Format = EN_TO_DXGI_FORMAT[texture_desc.format]
+		uav_desc.ViewDimension = .TEXTURE1DARRAY
+		uav_desc.Texture1DArray.MipSlice = u32(desc.mip_offset)
+		uav_desc.Texture1DArray.FirstArraySlice = u32(desc.layer_offset)
+		uav_desc.Texture1DArray.ArraySize = u32(remaining_layers)
+		create_uav(d, descriptor, t.resource, uav_desc, texture_desc.format) or_return
+		return
+	case .Color_Attachment:
+		rtv_desc: d3d12.RENDER_TARGET_VIEW_DESC
+		rtv_desc.Format = EN_TO_DXGI_FORMAT[texture_desc.format]
+		rtv_desc.ViewDimension = .TEXTURE1D
+		rtv_desc.Texture1D.MipSlice = u32(desc.mip_offset)
+		create_rtv(d, descriptor, t.resource, rtv_desc) or_return
+		return
+	case .Depth_Stencil_Attachment,
+	     .Depth_Stencil_Readonly,
+	     .Depth_Attachment_Stencil_Readonly,
+	     .Depth_Readonly_Stencil_Attachment:
+		dsv_desc: d3d12.DEPTH_STENCIL_VIEW_DESC
+		dsv_desc.Format = EN_TO_DXGI_FORMAT[texture_desc.format]
+		dsv_desc.ViewDimension = .TEXTURE1DARRAY
+		dsv_desc.Texture1DArray.MipSlice = u32(desc.mip_offset)
+		dsv_desc.Texture1DArray.FirstArraySlice = u32(desc.layer_offset)
+		dsv_desc.Texture1DArray.ArraySize = u32(remaining_layers)
+
+		#partial switch desc.view_type {
+		case .Depth_Readonly_Stencil_Attachment:
+			dsv_desc.Flags = {.READ_ONLY_DEPTH}
+		case .Depth_Attachment_Stencil_Readonly:
+			dsv_desc.Flags = {.READ_ONLY_STENCIL}
+		case .Depth_Stencil_Readonly:
+			dsv_desc.Flags = {.READ_ONLY_DEPTH, .READ_ONLY_STENCIL}
+		}
+
+		create_dsv(d, descriptor, t.resource, dsv_desc) or_return
+		return
+	}
+
+	error = .Unknown
+	return
+}
+
+get_plane_index :: proc "contextless" (format: Format) -> u32 {
+	#partial switch format {
+	case .X32_G8_UINT_X24:
+	case .X24_G8_UINT:
+		return 1
+	case:
+		return 0
+	}
+	return 0
+}
+
+format_for_depth :: proc "contextless" (format: dxgi.FORMAT) -> dxgi.FORMAT {
+	#partial switch format {
+	case .D16_UNORM:
+		return .R16_UNORM
+	case .D24_UNORM_S8_UINT:
+		return .R24_UNORM_X8_TYPELESS
+	case .D32_FLOAT:
+		return .R32_FLOAT
+	case .D32_FLOAT_S8X24_UINT:
+		return .R32_FLOAT_X8X24_TYPELESS
+	}
+	return format
+}
+
+create_2d_texture_view :: proc(
+	instance: ^Instance,
+	device: ^Device,
+	#by_ptr desc: Texture_2D_View_Desc,
+) -> (
+	out_descriptor: ^Descriptor,
+	error: Error,
+) {
+	i: ^D3D12_Instance = (^D3D12_Instance)(instance)
+	d: ^D3D12_Device = (^D3D12_Device)(device)
+	t: ^D3D12_Texture = (^D3D12_Texture)(desc.texture)
+
+	descriptor, alloc_err := new(D3D12_Descriptor)
+	if alloc_err != nil {
+		error = .Out_Of_Memory
+		return
+	}
+
+	texture_desc := t.desc
+	remaining_mips :=
+		(texture_desc.mip_num - desc.mip_offset) if desc.mip_num == REMAINING_MIPS else desc.mip_num
+	remaining_layers :=
+		(texture_desc.layer_num - desc.layer_offset) if desc.layer_num == REMAINING_LAYERS else desc.layer_num
+
+	switch desc.view_type {
+	case .Shader_Resource:
+		srv_desc: d3d12.SHADER_RESOURCE_VIEW_DESC
+		srv_desc.Format = format_for_depth(EN_TO_DXGI_FORMAT[texture_desc.format])
+		srv_desc.Shader4ComponentMapping = DEFAULT_SHADER_4_COMPONENT_MAPPING
+		if texture_desc.sample_num > 1 {
+			srv_desc.ViewDimension = .TEXTURE2DMS
+		} else {
+			srv_desc.ViewDimension = .TEXTURE2D
+			srv_desc.Texture2D.MostDetailedMip = u32(desc.mip_offset)
+			srv_desc.Texture2D.MipLevels = u32(remaining_mips)
+			srv_desc.Texture2D.PlaneSlice = get_plane_index(texture_desc.format)
+		}
+		create_srv(d, descriptor, t.resource, srv_desc) or_return
+		return
+	case .Shader_Resource_Array:
+		srv_desc: d3d12.SHADER_RESOURCE_VIEW_DESC
+		srv_desc.Format = format_for_depth(EN_TO_DXGI_FORMAT[texture_desc.format])
+		srv_desc.Shader4ComponentMapping = DEFAULT_SHADER_4_COMPONENT_MAPPING
+		if (texture_desc.sample_num > 1) {
+			srv_desc.ViewDimension = .TEXTURE2DMSARRAY
+			srv_desc.Texture2DMSArray.FirstArraySlice = u32(desc.layer_offset)
+			srv_desc.Texture2DMSArray.ArraySize = u32(remaining_layers)
+		} else {
+			srv_desc.ViewDimension = .TEXTURE2DARRAY
+			srv_desc.Texture2DArray.MostDetailedMip = u32(desc.mip_offset)
+			srv_desc.Texture2DArray.MipLevels = u32(remaining_mips)
+			srv_desc.Texture2DArray.FirstArraySlice = u32(desc.layer_offset)
+			srv_desc.Texture2DArray.ArraySize = u32(remaining_layers)
+			srv_desc.Texture2DArray.PlaneSlice = get_plane_index(desc.format)
+		}
+		create_srv(d, descriptor, t.resource, srv_desc) or_return
+		return
+	case .Shader_Resource_Cube:
+		srv_desc: d3d12.SHADER_RESOURCE_VIEW_DESC
+		srv_desc.Format = format_for_depth(EN_TO_DXGI_FORMAT[texture_desc.format])
+		srv_desc.Shader4ComponentMapping = DEFAULT_SHADER_4_COMPONENT_MAPPING
+		srv_desc.ViewDimension = .TEXTURECUBE
+		srv_desc.TextureCube.MostDetailedMip = u32(desc.mip_offset)
+		srv_desc.TextureCube.MipLevels = u32(remaining_mips)
+		create_srv(d, descriptor, t.resource, srv_desc) or_return
+		return
+	case .Shader_Resource_Cube_Array:
+		srv_desc: d3d12.SHADER_RESOURCE_VIEW_DESC
+		srv_desc.Format = format_for_depth(EN_TO_DXGI_FORMAT[texture_desc.format])
+		srv_desc.Shader4ComponentMapping = DEFAULT_SHADER_4_COMPONENT_MAPPING
+		srv_desc.ViewDimension = .TEXTURECUBEARRAY
+		srv_desc.TextureCubeArray.MostDetailedMip = u32(desc.mip_offset)
+		srv_desc.TextureCubeArray.MipLevels = u32(remaining_mips)
+		srv_desc.TextureCubeArray.First2DArrayFace = u32(desc.layer_offset)
+		srv_desc.TextureCubeArray.NumCubes = u32(remaining_layers / 6)
+		create_srv(d, descriptor, t.resource, srv_desc) or_return
+		return
+	case .Shader_Resource_Storage:
+		uav_desc: d3d12.UNORDERED_ACCESS_VIEW_DESC
+		uav_desc.Format = EN_TO_DXGI_FORMAT[texture_desc.format]
+		uav_desc.ViewDimension = .TEXTURE2D
+		uav_desc.Texture2D.MipSlice = u32(desc.mip_offset)
+		uav_desc.Texture2D.PlaneSlice = get_plane_index(texture_desc.format)
+		create_uav(d, descriptor, t.resource, uav_desc, texture_desc.format) or_return
+		return
+	case .Shader_Resource_Storage_Array:
+		uav_desc: d3d12.UNORDERED_ACCESS_VIEW_DESC
+		uav_desc.Format = EN_TO_DXGI_FORMAT[texture_desc.format]
+		uav_desc.ViewDimension = .TEXTURE2DARRAY
+		uav_desc.Texture2DArray.MipSlice = u32(desc.mip_offset)
+		uav_desc.Texture2DArray.FirstArraySlice = u32(desc.layer_offset)
+		uav_desc.Texture2DArray.ArraySize = u32(remaining_layers)
+		uav_desc.Texture2DArray.PlaneSlice = get_plane_index(texture_desc.format)
+		create_uav(d, descriptor, t.resource, uav_desc, texture_desc.format) or_return
+		return
+	case .Color_Attachment:
+		rtv_desc: d3d12.RENDER_TARGET_VIEW_DESC
+		rtv_desc.Format = EN_TO_DXGI_FORMAT[texture_desc.format]
+		rtv_desc.ViewDimension = .TEXTURE2DARRAY
+		rtv_desc.Texture2DArray.MipSlice = u32(desc.mip_offset)
+		rtv_desc.Texture2DArray.FirstArraySlice = u32(desc.layer_offset)
+		rtv_desc.Texture2DArray.ArraySize = u32(remaining_layers)
+		rtv_desc.Texture2DArray.PlaneSlice = get_plane_index(texture_desc.format)
+		create_rtv(d, descriptor, t.resource, rtv_desc) or_return
+		return
+	case .Depth_Stencil_Attachment,
+	     .Depth_Stencil_Readonly,
+	     .Depth_Attachment_Stencil_Readonly,
+	     .Depth_Readonly_Stencil_Attachment:
+		dsv_desc: d3d12.DEPTH_STENCIL_VIEW_DESC
+		dsv_desc.Format = EN_TO_DXGI_FORMAT[texture_desc.format]
+		dsv_desc.ViewDimension = .TEXTURE2DARRAY
+		dsv_desc.Texture2DArray.MipSlice = u32(desc.mip_offset)
+		dsv_desc.Texture2DArray.FirstArraySlice = u32(desc.layer_offset)
+		dsv_desc.Texture2DArray.ArraySize = u32(remaining_layers)
+
+		#partial switch desc.view_type {
+		case .Depth_Readonly_Stencil_Attachment:
+			dsv_desc.Flags = {.READ_ONLY_DEPTH}
+		case .Depth_Attachment_Stencil_Readonly:
+			dsv_desc.Flags = {.READ_ONLY_STENCIL}
+		case .Depth_Stencil_Readonly:
+			dsv_desc.Flags = {.READ_ONLY_DEPTH, .READ_ONLY_STENCIL}
+		}
+
+		create_dsv(d, descriptor, t.resource, dsv_desc) or_return
+		return
+	case .Shading_Rate_Attachment:
+		descriptor.resource = t.resource
+		return
+	}
+
+	error = .Unknown
+	return
+}
+
+create_3d_texture_view :: proc(
+	instance: ^Instance,
+	device: ^Device,
+	#by_ptr desc: Texture_3D_View_Desc,
+) -> (
+	out_descriptor: ^Descriptor,
+	error: Error,
+) {
+	i: ^D3D12_Instance = (^D3D12_Instance)(instance)
+	d: ^D3D12_Device = (^D3D12_Device)(device)
+	t: ^D3D12_Texture = (^D3D12_Texture)(desc.texture)
+
+	descriptor, alloc_err := new(D3D12_Descriptor)
+	if alloc_err != nil {
+		error = .Out_Of_Memory
+		return
+	}
+
+	texture_desc := t.desc
+	remaining_mips :=
+		(texture_desc.mip_num - desc.mip_offset) if desc.mip_num == REMAINING_MIPS else desc.mip_num
+
+	switch desc.view_type {
+	case .Shader_Resource:
+		srv_desc: d3d12.SHADER_RESOURCE_VIEW_DESC
+		srv_desc.Format = EN_TO_DXGI_FORMAT[texture_desc.format]
+		srv_desc.ViewDimension = .TEXTURE3D
+		srv_desc.Shader4ComponentMapping = DEFAULT_SHADER_4_COMPONENT_MAPPING
+		srv_desc.Texture3D.MostDetailedMip = u32(desc.mip_offset)
+		srv_desc.Texture3D.MipLevels = u32(remaining_mips)
+		create_srv(d, descriptor, t.resource, srv_desc) or_return
+		return
+	case .Shader_Resource_Storage:
+		uav_desc: d3d12.UNORDERED_ACCESS_VIEW_DESC
+		uav_desc.Format = EN_TO_DXGI_FORMAT[texture_desc.format]
+		uav_desc.ViewDimension = .TEXTURE3D
+		uav_desc.Texture3D.MipSlice = u32(desc.mip_offset)
+		uav_desc.Texture3D.FirstWSlice = u32(desc.slice_offset)
+		uav_desc.Texture3D.WSize = u32(desc.slice_num)
+		create_uav(d, descriptor, t.resource, uav_desc, texture_desc.format) or_return
+		return
+	case .Color_Attachment:
+		rtv_desc: d3d12.RENDER_TARGET_VIEW_DESC
+		rtv_desc.Format = EN_TO_DXGI_FORMAT[texture_desc.format]
+		rtv_desc.ViewDimension = .TEXTURE3D
+		rtv_desc.Texture3D.MipSlice = u32(desc.mip_offset)
+		rtv_desc.Texture3D.FirstWSlice = u32(desc.slice_offset)
+		rtv_desc.Texture3D.WSize = u32(desc.slice_num)
+		create_rtv(d, descriptor, t.resource, rtv_desc) or_return
+		return
+	}
+	return
+}
+
+create_buffer_view :: proc(
+	instance: ^Instance,
+	device: ^Device,
+	#by_ptr desc: Buffer_View_Desc,
+) -> (
+	out_descriptor: ^Descriptor,
+	error: Error,
+) {
+	i: ^D3D12_Instance = (^D3D12_Instance)(instance)
+	d: ^D3D12_Device = (^D3D12_Device)(device)
+	b: ^D3D12_Buffer = (^D3D12_Buffer)(desc.buffer)
+
+	descriptor, alloc_err := new(D3D12_Descriptor)
+	if alloc_err != nil {
+		error = .Out_Of_Memory
+		return
+	}
+
+	buffer_desc := b.desc
+	size := buffer_desc.size if desc.size == WHOLE_SIZE else desc.size
+
+	format := EN_TO_DXGI_FORMAT[desc.format]
+	props := FORMAT_PROPS[desc.format]
+	element_size :=
+		buffer_desc.structure_stride if buffer_desc.structure_stride > 0 else u32(props.stride)
+	element_offset := u32(desc.offset / u64(element_size))
+	element_num := u32(size / u64(element_size))
+
+	descriptor.buffer_gpu_location = b.resource->GetGPUVirtualAddress() + desc.offset
+	descriptor.buffer_view_type = desc.view_type
+
+	switch desc.view_type {
+	case .Shader_Resource:
+		srv_desc: d3d12.SHADER_RESOURCE_VIEW_DESC
+		srv_desc.Format = format
+		srv_desc.Shader4ComponentMapping = DEFAULT_SHADER_4_COMPONENT_MAPPING
+		srv_desc.ViewDimension = .BUFFER
+		srv_desc.Buffer.FirstElement = u64(element_offset)
+		srv_desc.Buffer.NumElements = element_num
+		srv_desc.Buffer.StructureByteStride = buffer_desc.structure_stride
+		create_srv(d, descriptor, b.resource, srv_desc) or_return
+		return
+	case .Shader_Resource_Storage:
+		uav_desc: d3d12.UNORDERED_ACCESS_VIEW_DESC
+		uav_desc.Format = format
+		uav_desc.ViewDimension = .BUFFER
+		uav_desc.Buffer.FirstElement = u64(element_offset)
+		uav_desc.Buffer.NumElements = element_num
+		uav_desc.Buffer.StructureByteStride = buffer_desc.structure_stride
+		uav_desc.Buffer.CounterOffsetInBytes = 0
+		create_uav(d, descriptor, b.resource, uav_desc, desc.format) or_return
+		return
+	case .Constant:
+		cbv_desc: d3d12.CONSTANT_BUFFER_VIEW_DESC
+		cbv_desc.BufferLocation = descriptor.buffer_gpu_location
+		cbv_desc.SizeInBytes = u32(size)
+
+		create_cbv(d, descriptor, b.resource, cbv_desc) or_return
+		return
+	}
+
+	error = .Unknown
+	return
+}
+
+get_filter_anisotropic :: proc "contextless" (
+	ext: Filter_Ext,
+	use_comparison: bool,
+) -> d3d12.FILTER {
+	if ext == .Min do return .MINIMUM_ANISOTROPIC
+	if ext == .Max do return .MAXIMUM_ANISOTROPIC
+	if use_comparison do return .COMPARISON_ANISOTROPIC
+	return .ANISOTROPIC
+}
+
+get_filter_isotropic :: proc "contextless" (
+	mip: Filter,
+	mag: Filter,
+	min: Filter,
+	ext: Filter_Ext,
+	use_comparison: bool,
+) -> d3d12.FILTER {
+	combined_mask: u32 = 0
+	combined_mask |= 0x1 if mip == .Nearest else 0
+	combined_mask |= 0x4 if mag == .Linear else 0
+	combined_mask |= 0x10 if min == .Linear else 0
+
+	if use_comparison do combined_mask |= 0x80
+	else if ext == .Min do combined_mask |= 0x100
+	else if ext == .Max do combined_mask |= 0x180
+
+	return d3d12.FILTER(combined_mask)
+}
+
+EN_ADDRESS_MODE_TO_D3D12 := [Address_Mode]d3d12.TEXTURE_ADDRESS_MODE {
+	.Repeat               = .WRAP,
+	.Mirrored_Repeat      = .MIRROR,
+	.Clamp_To_Edge        = .CLAMP,
+	.Clamp_To_Border      = .BORDER,
+	.Mirror_Clamp_To_Edge = .MIRROR_ONCE,
+}
+
+EN_TO_D3D12_COMPARISON_FUNC := [Compare_Func]d3d12.COMPARISON_FUNC {
+	.None          = .NEVER,
+	.Always        = .ALWAYS,
+	.Never         = .NEVER,
+	.Equal         = .EQUAL,
+	.Not_Equal     = .NOT_EQUAL,
+	.Less          = .LESS,
+	.Less_Equal    = .LESS_EQUAL,
+	.Greater       = .GREATER,
+	.Greater_Equal = .GREATER_EQUAL,
+}
+
+create_sampler :: proc(
+	instance: ^Instance,
+	device: ^Device,
+	#by_ptr desc: Sampler_Desc,
+) -> (
+	out_sampler: ^Descriptor,
+	error: Error,
+) {
+	i: ^D3D12_Instance = (^D3D12_Instance)(instance)
+	d: ^D3D12_Device = (^D3D12_Device)(device)
+
+	descriptor, alloc_err := new(D3D12_Descriptor)
+	if alloc_err != nil {
+		error = .Out_Of_Memory
+		return
+	}
+
+	descriptor.handle = allocate_cpu_descriptor(d, .SAMPLER) or_return
+	descriptor.cpu_descriptor = get_staging_descriptor_cpu_pointer(d, descriptor.handle)
+
+	use_anisotropy := desc.anisotropy > 1
+	use_comparison := desc.compare_func != .None
+	anisotropy_filter := get_filter_anisotropic(desc.filters.ext, use_comparison)
+	isotropy_filter := get_filter_isotropic(
+		desc.filters.mip,
+		desc.filters.mag,
+		desc.filters.min,
+		desc.filters.ext,
+		use_comparison,
+	)
+	filter := anisotropy_filter if use_anisotropy else isotropy_filter
+
+	sampler_desc: d3d12.SAMPLER_DESC
+	sampler_desc.Filter = filter
+	sampler_desc.AddressU = EN_ADDRESS_MODE_TO_D3D12[desc.address_modes.u]
+	sampler_desc.AddressV = EN_ADDRESS_MODE_TO_D3D12[desc.address_modes.v]
+	sampler_desc.AddressW = EN_ADDRESS_MODE_TO_D3D12[desc.address_modes.w]
+	sampler_desc.MipLODBias = desc.mip_bias
+	sampler_desc.MaxAnisotropy = u32(desc.anisotropy)
+	sampler_desc.ComparisonFunc = EN_TO_D3D12_COMPARISON_FUNC[desc.compare_func]
+	sampler_desc.MinLOD = desc.mip_min
+	sampler_desc.MaxLOD = desc.mip_max
+
+	if (!desc.is_integer) {
+		colorf := desc.border_color.(Colorf)
+		sampler_desc.BorderColor[0] = colorf.r
+		sampler_desc.BorderColor[1] = colorf.g
+		sampler_desc.BorderColor[2] = colorf.b
+		sampler_desc.BorderColor[3] = colorf.a
+	}
+
+	d.device->CreateSampler(&sampler_desc, descriptor.cpu_descriptor)
+
+	return
+}
+
+destroy_descriptor :: proc(instance: ^Instance, device: ^Device, descriptor: ^Descriptor) {
+	d: ^D3D12_Device = (^D3D12_Device)(device)
+	d3d12_descriptor: ^D3D12_Descriptor = (^D3D12_Descriptor)(descriptor)
+	free_cpu_descriptor(d, d3d12_descriptor.handle)
+	free(d)
+}
+
+set_descriptor_debug_name :: proc(
+	instance: ^Instance,
+	descriptor: ^Descriptor,
+	name: string,
+) -> (
+	error: mem.Allocator_Error,
+) {
+	// unused
+	return
 }
 
 D3D12_Descriptor_Heap :: struct {
@@ -2080,4 +2859,23 @@ set_texture_debug_name :: proc(
 ) {
 	t: ^D3D12_Texture = (^D3D12_Texture)(texture)
 	return set_debug_name(t.resource, name)
+}
+
+get_texture_subresource_index :: proc(
+	desc: Texture_Desc,
+	layer_offset, mip_offset: u32,
+	planes: Plane_Flags,
+) -> u32 {
+	plane_index: u32
+	if planes != Plane_All {
+		if .Depth in planes {
+			plane_index = 0
+		} else if .Stencil in planes {
+			plane_index = 1
+		} else {
+			panic("Invalid plane flags")
+		}
+	}
+
+	return mip_offset + (layer_offset + plane_index * u32(desc.layer_num)) * u32(desc.mip_num)
 }

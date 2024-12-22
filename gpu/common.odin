@@ -57,6 +57,8 @@ validate_instance :: proc(instance: ^Instance) -> Error {
 }
 
 Instance :: struct {
+	api:                              Graphics_API,
+
 	// instance
 	destroy:                          proc(instance: ^Instance),
 
@@ -83,6 +85,32 @@ Instance :: struct {
 		queue: ^Command_Queue,
 		error: Error,
 	),
+
+	// buffer
+	create_buffer:                    proc(
+		instance: ^Instance,
+		device: ^Device,
+		#by_ptr desc: Buffer_Desc,
+	) -> (
+		buffer: ^Buffer,
+		error: Error,
+	),
+	destroy_buffer:                   proc(instance: ^Instance, buffer: ^Buffer),
+	set_buffer_debug_name:            proc(
+		instance: ^Instance,
+		buffer: ^Buffer,
+		name: string,
+	) -> mem.Allocator_Error,
+	map_buffer:                       proc(
+		instance: ^Instance,
+		buffer: ^Buffer,
+		offset: u64,
+		size: u64,
+	) -> (
+		mapped_memory: []u8,
+		error: Error,
+	),
+	unmap_buffer:                     proc(instance: ^Instance, buffer: ^Buffer),
 
 	// command allocator
 	create_command_allocator:         proc(
@@ -120,6 +148,58 @@ Instance :: struct {
 		queue: ^Command_Queue,
 		buffers: []^Command_Buffer,
 	),
+
+	// descriptor
+	create_1d_texture_view:           proc(
+		instance: ^Instance,
+		device: ^Device,
+		#by_ptr desc: Texture_1D_View_Desc,
+	) -> (
+		out_descriptor: ^Descriptor,
+		error: Error,
+	),
+	create_2d_texture_view:           proc(
+		instance: ^Instance,
+		device: ^Device,
+		#by_ptr desc: Texture_2D_View_Desc,
+	) -> (
+		out_descriptor: ^Descriptor,
+		error: Error,
+	),
+	create_3d_texture_view:           proc(
+		instance: ^Instance,
+		device: ^Device,
+		#by_ptr desc: Texture_3D_View_Desc,
+	) -> (
+		out_descriptor: ^Descriptor,
+		error: Error,
+	),
+	create_buffer_view:               proc(
+		instance: ^Instance,
+		device: ^Device,
+		#by_ptr desc: Buffer_View_Desc,
+	) -> (
+		out_descriptor: ^Descriptor,
+		error: Error,
+	),
+	create_sampler:                   proc(
+		instance: ^Instance,
+		device: ^Device,
+		#by_ptr desc: Sampler_Desc,
+	) -> (
+		out_descriptor: ^Descriptor,
+		error: Error,
+	),
+	destroy_descriptor:               proc(
+		instance: ^Instance,
+		device: ^Device,
+		descriptor: ^Descriptor,
+	),
+	set_descriptor_debug_name:        proc(
+		instance: ^Instance,
+		descriptor: ^Descriptor,
+		name: string,
+	) -> mem.Allocator_Error,
 
 	// descriptor pool
 	create_descriptor_pool:           proc(
@@ -277,11 +357,11 @@ sample :: u8
 dim :: u16
 memory_type :: u32
 
-ALL_SAMPLES: u32 : 0
-ONE_VIEWPORT: u32 : 0
-WHOLE_SIZE: u32 : 0
-REMAINING_MIPS: u32 : 0
-REMAINING_LAYERS: u32 : 0
+ALL_SAMPLES :: 0
+ONE_VIEWPORT :: 0
+WHOLE_SIZE :: 0
+REMAINING_MIPS :: 0
+REMAINING_LAYERS :: 0
 
 Graphics_API :: enum {
 	D3D12,
@@ -603,6 +683,7 @@ fix_texture_desc :: proc(desc: ^Texture_Desc) {
 
 Buffer_Desc :: struct {
 	usage:            Buffer_Usage_Flags,
+	location:         Memory_Location,
 	size:             u64,
 	structure_stride: u32,
 }
