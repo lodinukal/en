@@ -3,13 +3,12 @@ package app
 import "en:gpu"
 
 Resizable_Buffer :: struct {
-	buffer:   ^gpu.Buffer,
-	srv:      ^gpu.Descriptor,
-	uav:      ^gpu.Descriptor,
-	location: gpu.Memory_Location,
-	desc:     gpu.Buffer_Desc,
-	len:      u64,
-	name:     string,
+	buffer: ^gpu.Buffer,
+	srv:    ^gpu.Descriptor,
+	uav:    ^gpu.Descriptor,
+	desc:   gpu.Buffer_Desc,
+	len:    u64,
+	name:   string,
 }
 
 init_resizable_buffer :: proc(buffer: ^Resizable_Buffer, renderer: ^Renderer) {
@@ -130,7 +129,7 @@ buffer_set :: proc(
 	execute: bool = true,
 ) {
 	// requires a transfer op
-	if buffer.location == .Device {
+	if buffer.desc.location == .Device {
 		// TODO
 		panic("Not implemented")
 	}
