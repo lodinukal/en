@@ -85,6 +85,42 @@ create_d3d12_instance :: proc(
 	instance.set_command_allocator_debug_name = set_command_allocator_debug_name
 	instance.reset_command_allocator = reset_command_allocator
 
+	instance.create_command_buffer = create_command_buffer
+	instance.destroy_command_buffer = destroy_command_buffer
+	instance.set_command_buffer_debug_name = set_command_buffer_debug_name
+	instance.begin_command_buffer = begin_command_buffer
+	instance.end_command_buffer = end_command_buffer
+	instance.cmd_set_viewports = cmd_set_viewports
+	instance.cmd_set_scissors = cmd_set_scissors
+	instance.cmd_set_depth_bounds = cmd_set_depth_bounds
+	instance.cmd_set_stencil_reference = cmd_set_stencil_reference
+	instance.cmd_set_sample_locations = cmd_set_sample_locations
+	instance.cmd_set_blend_constants = cmd_set_blend_constants
+	instance.cmd_clear_attachments = cmd_clear_attachments
+	instance.cmd_clear_storage_buffer = cmd_clear_storage_buffer
+	instance.cmd_clear_storage_texture = cmd_clear_storage_texture
+	instance.cmd_begin_rendering = cmd_begin_rendering
+	instance.cmd_end_rendering = cmd_end_rendering
+	instance.cmd_set_vertex_buffers = cmd_set_vertex_buffers
+	instance.cmd_set_index_buffer = cmd_set_index_buffer
+	instance.cmd_set_pipeline_layout = cmd_set_pipeline_layout
+	instance.cmd_set_pipeline = cmd_set_pipeline
+	instance.cmd_set_descriptor_pool = cmd_set_descriptor_pool
+	instance.cmd_set_descriptor_set = cmd_set_descriptor_set
+	instance.cmd_set_constants = cmd_set_constants
+	instance.cmd_draw = cmd_draw
+	instance.cmd_draw_indexed = cmd_draw_indexed
+	instance.cmd_draw_indirect = cmd_draw_indirect
+	instance.cmd_draw_indexed_indirect = cmd_draw_indexed_indirect
+	instance.cmd_copy_buffer = cmd_copy_buffer
+	instance.cmd_copy_texture = cmd_copy_texture
+	instance.cmd_resolve_texture = cmd_resolve_texture
+	instance.cmd_upload_buffer_to_texture = cmd_upload_buffer_to_texture
+	instance.cmd_readback_texture_to_buffer = cmd_readback_texture_to_buffer
+	instance.cmd_dispatch = cmd_dispatch
+	instance.cmd_dispatch_indirect = cmd_dispatch_indirect
+	instance.cmd_barrier = cmd_barrier
+
 	instance.create_command_queue = create_command_queue
 	instance.destroy_command_queue = destroy_command_queue
 	instance.set_command_queue_debug_name = set_command_queue_debug_name
@@ -95,6 +131,8 @@ create_d3d12_instance :: proc(
 	instance.set_descriptor_pool_debug_name = set_descriptor_pool_debug_name
 	instance.allocate_descriptor_set = allocate_descriptor_set
 	instance.reset_descriptor_pool = reset_descriptor_pool
+
+	instance.update_descriptor_ranges = update_descriptor_ranges
 
 	instance.create_fence = create_fence
 	instance.destroy_fence = destroy_fence
@@ -123,6 +161,7 @@ create_d3d12_instance :: proc(
 	instance.create_texture = create_texture
 	instance.destroy_texture = destroy_texture
 	instance.set_texture_debug_name = set_texture_debug_name
+	instance.get_texture_desc = get_texture_desc
 
 	if enable_graphics_api_validation {
 		debug_controller: ^d3d12.IDebug = nil
@@ -154,17 +193,6 @@ destroy_instance :: proc(instance: ^Instance) {
 	instance := (^D3D12_Instance)(instance)
 	instance.factory->Release()
 	free(instance)
-}
-
-D3D12_Device :: struct {
-	using _:          Device,
-	desc:             Device_Desc,
-	device:           ^d3d12.IDevice5,
-	allocator:        ^d3d12ma.Allocator,
-	adapter:          ^dxgi.IAdapter1,
-	queues:           [Command_Queue_Type]^Command_Queue,
-	heaps:            [dynamic]D3D12_Staging_Heap,
-	free_descriptors: [d3d12.DESCRIPTOR_HEAP_TYPE][dynamic]D3D12_CPU_Descriptor_Handle,
 }
 
 D3D12_Buffer :: struct {
@@ -336,7 +364,7 @@ create_staging_heap :: proc(
 
 	free_descriptors := &d.free_descriptors[type]
 	alloc_descriptors_arr := reserve(free_descriptors, desc.NumDescriptors)
-	if alloc_descriptors_arr == nil {
+	if alloc_descriptors_arr != nil {
 		error = .Out_Of_Memory
 		return
 	}
@@ -355,6 +383,7 @@ create_staging_heap :: proc(
 	arg, alloc_err := append(
 		&d.heaps,
 		D3D12_Staging_Heap {
+			heap = heap,
 			base_descriptor = base_descriptor.ptr,
 			descriptor_size = descriptor_size,
 		},
@@ -414,6 +443,19 @@ get_staging_descriptor_cpu_pointer :: proc(
 	return
 }
 
+D3D12_Device :: struct {
+	using _:               Device,
+	desc:                  Device_Desc,
+	device:                ^d3d12.IDevice5,
+	allocator:             ^d3d12ma.Allocator,
+	adapter:               ^dxgi.IAdapter1,
+	queues:                [Command_Queue_Type]^Command_Queue,
+	heaps:                 [dynamic]D3D12_Staging_Heap,
+	free_descriptors:      [d3d12.DESCRIPTOR_HEAP_TYPE][dynamic]D3D12_CPU_Descriptor_Handle,
+	//
+	indirect_dispatch_sig: ^d3d12.ICommandSignature,
+}
+
 create_device :: proc(
 	instance: ^Instance,
 	#by_ptr desc: Device_Creation_Desc,
@@ -470,7 +512,7 @@ create_device :: proc(
 
 			info_queue->SetBreakOnSeverity(.CORRUPTION, true)
 			info_queue->SetBreakOnSeverity(.ERROR, true)
-			info_queue->SetBreakOnSeverity(.WARNING, true)
+			// info_queue->SetBreakOnSeverity(.WARNING, true)
 			disable_ids := [?]d3d12.MESSAGE_ID {
 				.CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE,
 				.COMMAND_LIST_STATIC_DESCRIPTOR_RESOURCE_DIMENSION_MISMATCH,
@@ -518,6 +560,21 @@ create_device :: proc(
 		return
 	}
 
+	device.indirect_dispatch_sig = create_command_signature(
+		device,
+		.DISPATCH,
+		nil,
+		size_of(Dispatch_Desc),
+		false,
+	)
+	if device.indirect_dispatch_sig == nil {
+		error = .Unknown
+		return
+	}
+
+	device.desc.upload_buffer_texture_row_alignment = d3d12.TEXTURE_DATA_PITCH_ALIGNMENT
+	device.desc.upload_buffer_texture_slice_alignment = d3d12.TEXTURE_DATA_PLACEMENT_ALIGNMENT
+
 	out_device = (^Device)(device)
 	return
 }
@@ -525,10 +582,21 @@ create_device :: proc(
 destroy_device :: proc(instance: ^Instance, device: ^Device) {
 	d: ^D3D12_Device = (^D3D12_Device)(device)
 
+	d.indirect_dispatch_sig.id3d12pageable->Release()
+
 	for queue in d.queues {
 		if queue != nil {
 			instance->destroy_command_queue(queue)
 		}
+	}
+
+	for heap in d.heaps {
+		heap.heap->Release()
+	}
+	delete(d.heaps)
+
+	for descriptors, type in d.free_descriptors {
+		delete(descriptors)
 	}
 
 	d3d12ma.Allocator_Release(d.allocator)
@@ -564,12 +632,7 @@ get_command_queue :: proc(
 	d: ^D3D12_Device = (^D3D12_Device)(device)
 
 	if d.queues[type] == nil {
-		queue, error := instance->create_command_queue(device, type)
-		if error != nil {
-			error = error
-			return
-		}
-		d.queues[type] = queue
+		d.queues[type] = instance->create_command_queue(device, type) or_return
 	}
 
 	out_queue = d.queues[type]
@@ -578,6 +641,7 @@ get_command_queue :: proc(
 
 D3D12_Command_Allocator :: struct {
 	using _:   Command_Allocator,
+	queue:     ^D3D12_Command_Queue,
 	allocator: ^d3d12.ICommandAllocator,
 	type:      d3d12.COMMAND_LIST_TYPE,
 }
@@ -596,6 +660,7 @@ create_command_allocator :: proc(
 		error = .Out_Of_Memory
 		return
 	}
+	allocator.queue = q
 
 	hr := d.device->CreateCommandAllocator(
 		q.type,
@@ -639,7 +704,7 @@ ROOT_SIGNATURE_DWORD_NUM :: 64
 D3D12_Command_Buffer :: struct {
 	using _:            Command_Buffer,
 	allocator:          ^D3D12_Command_Allocator,
-	list:               ^d3d12.IGraphicsCommandList,
+	list:               ^d3d12.IGraphicsCommandList4,
 	render_targets:     small_array.Small_Array(
 		d3d12.SIMULTANEOUS_RENDER_TARGET_COUNT,
 		d3d12.CPU_DESCRIPTOR_HANDLE,
@@ -650,6 +715,1005 @@ D3D12_Command_Buffer :: struct {
 	primitive_topology: d3d12.PRIMITIVE_TOPOLOGY,
 	descriptor_sets:    small_array.Small_Array(ROOT_SIGNATURE_DWORD_NUM, ^D3D12_Descriptor_Set),
 	is_graphics:        bool,
+}
+
+create_command_buffer :: proc(
+	instance: ^Instance,
+	allocator: ^Command_Allocator,
+) -> (
+	out_buffer: ^Command_Buffer,
+	error: Error,
+) {
+	a: ^D3D12_Command_Allocator = (^D3D12_Command_Allocator)(allocator)
+	buffer, alloc_err := new(D3D12_Command_Buffer)
+	if alloc_err != nil {
+		error = .Out_Of_Memory
+		return
+	}
+	buffer.allocator = a
+
+	hr := a.queue.device.device->CreateCommandList(
+		0,
+		a.type,
+		a.allocator,
+		nil,
+		d3d12.IGraphicsCommandList4_UUID,
+		(^rawptr)(&buffer.list),
+	)
+	if !win32.SUCCEEDED(hr) {
+		error = .Unknown
+		return
+	}
+
+	hr = buffer.list->Close()
+	if !win32.SUCCEEDED(hr) {
+		error = .Unknown
+		return
+	}
+
+	out_buffer = (^Command_Buffer)(buffer)
+	return
+}
+
+destroy_command_buffer :: proc(instance: ^Instance, buffer: ^Command_Buffer) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(buffer)
+	b.list->Release()
+	free(b)
+}
+
+set_command_buffer_debug_name :: proc(
+	instance: ^Instance,
+	buffer: ^Command_Buffer,
+	name: string,
+) -> (
+	error: mem.Allocator_Error,
+) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(buffer)
+	return set_debug_name(b.list, name)
+}
+
+begin_command_buffer :: proc(instance: ^Instance, buffer: ^Command_Buffer) -> (error: Error) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(buffer)
+	hr := b.list->Reset(b.allocator.allocator, nil)
+	if !win32.SUCCEEDED(hr) {
+		error = .Unknown
+		return
+	}
+	b.pipeline_layout = nil
+	b.pipeline = nil
+	b.is_graphics = false
+	b.primitive_topology = .UNDEFINED
+	b.render_targets = {}
+	return
+}
+
+end_command_buffer :: proc(instance: ^Instance, buffer: ^Command_Buffer) -> (error: Error) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(buffer)
+	hr := b.list->Close()
+	if !win32.SUCCEEDED(hr) {
+		error = .Unknown
+		return
+	}
+	return
+}
+
+cmd_set_viewports :: proc(instance: ^Instance, cmd: ^Command_Buffer, viewports: []Viewport) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+	temp: small_array.Small_Array(
+		d3d12.VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE,
+		d3d12.VIEWPORT,
+	)
+	for viewport in viewports {
+		top_left := viewport.y
+		height := viewport.height
+		if viewport.origin_bottom_left {
+			top_left += viewport.height
+			height = viewport.height
+		}
+		small_array.append(
+			&temp,
+			d3d12.VIEWPORT {
+				TopLeftX = viewport.x,
+				TopLeftY = top_left,
+				Width = viewport.width,
+				Height = height,
+				MinDepth = viewport.min_depth,
+				MaxDepth = viewport.max_depth,
+			},
+		)
+	}
+	b.list->RSSetViewports(u32(small_array.len(temp)), raw_data(small_array.slice(&temp)))
+}
+
+cmd_set_scissors :: proc(instance: ^Instance, cmd: ^Command_Buffer, scissors: []Rect) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+	temp: small_array.Small_Array(
+		d3d12.VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE,
+		d3d12.RECT,
+	)
+	for scissor in scissors {
+		small_array.append(
+			&temp,
+			d3d12.RECT {
+				left = i32(scissor.x),
+				top = i32(scissor.y),
+				right = i32(scissor.x + i16(scissor.width)),
+				bottom = i32(scissor.y + i16(scissor.height)),
+			},
+		)
+	}
+	b.list->RSSetScissorRects(u32(small_array.len(temp)), raw_data(small_array.slice(&temp)))
+}
+
+cmd_set_depth_bounds :: proc(instance: ^Instance, cmd: ^Command_Buffer, min, max: f32) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+	b.list->OMSetDepthBounds(min, max)
+}
+
+cmd_set_stencil_reference :: proc(instance: ^Instance, cmd: ^Command_Buffer, ref: u8) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+	b.list->OMSetStencilRef(u32(ref))
+}
+
+cmd_set_sample_locations :: proc(
+	instance: ^Instance,
+	cmd: ^Command_Buffer,
+	locations: []Sample_Location,
+	sample_num: sample,
+) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+	#assert(size_of(d3d12.SAMPLE_POSITION) == size_of(Sample_Location))
+	pixel_num := len(locations) / int(sample_num)
+	b.list->SetSamplePositions(
+		u32(sample_num),
+		u32(pixel_num),
+		([^]d3d12.SAMPLE_POSITION)(raw_data(locations)),
+	)
+}
+
+cmd_set_blend_constants :: proc(instance: ^Instance, cmd: ^Command_Buffer, constants: [4]f32) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+	constants := constants
+	b.list->OMSetBlendFactor(&constants)
+}
+
+// EN_SHADING_RATE_TO_D3D12 := [Shading_Rate]d3d12.SHADING_RATE {
+// 	.Fragment_Size_1x1 = ._1X1,
+// 	.Fragment_Size_1x2 = ._1X2,
+// 	.Fragment_Size_2x1 = ._2X1,
+// 	.Fragment_Size_2x2 = ._2X2,
+
+// 	// Require "is_additional_shading_rates_supported"
+// 	.Fragment_Size_2x4 = ._2X4,
+// 	.Fragment_Size_4x2 = ._4X2,
+// 	.Fragment_Size_4x4 = ._4X4,
+// }
+
+// agility sdk
+// cmd_set_shading_rate :: proc(
+// 	instance: ^Instance,
+// 	cmd: ^Command_Buffer,
+// 	#by_ptr desc: Shading_Rate_Desc,
+// ) {
+// 	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+// 	shading_rate := EN_SHADING_RATE_TO_D3D12[desc.shading_rate]
+
+// 	b.list->RSSetShadingRate(d3d12.SHADING_RATE(desc.rate))
+// }
+
+// cmd_set_depth_bias is only for agility sdk
+
+cmd_clear_attachments :: proc(
+	instance: ^Instance,
+	cmd: ^Command_Buffer,
+	clears: []Clear_Desc,
+	rects: []Rect,
+) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+
+	d3d_rects: small_array.Small_Array(d3d12.SIMULTANEOUS_RENDER_TARGET_COUNT, d3d12.RECT)
+	for rect in rects {
+		small_array.append(
+			&d3d_rects,
+			d3d12.RECT {
+				left = i32(rect.x),
+				top = i32(rect.y),
+				right = i32(rect.x + i16(rect.width)),
+				bottom = i32(rect.y + i16(rect.height)),
+			},
+		)
+	}
+
+	d3d_rect_len := u32(small_array.len(d3d_rects))
+	d3d_rect_data := raw_data(small_array.slice(&d3d_rects))
+
+
+	for clear_desc in clears {
+		if .Color in clear_desc.planes {
+			color: Colorf = clear_desc.value.(Color).(Colorf)
+			b.list->ClearRenderTargetView(
+				small_array.get(b.render_targets, int(clear_desc.color_attachment_index)),
+				&color,
+				u32(small_array.len(d3d_rects)),
+				d3d_rect_data,
+			)
+		} else {
+			clear_flags: d3d12.CLEAR_FLAGS
+			if .Depth in clear_desc.planes do clear_flags += {.DEPTH}
+			if .Stencil in clear_desc.planes do clear_flags += {.STENCIL}
+
+			ds := clear_desc.value.(Depth_Stencil)
+
+			b.list->ClearDepthStencilView(
+				b.depth_stencil,
+				clear_flags,
+				ds.depth,
+				u8(ds.stencil),
+				u32(small_array.len(d3d_rects)),
+				d3d_rect_data,
+			)
+		}
+	}
+}
+
+cmd_clear_storage_buffer :: proc(
+	instance: ^Instance,
+	cmd: ^Command_Buffer,
+	#by_ptr desc: Clear_Storage_Buffer_Desc,
+) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+	ds: ^D3D12_Descriptor_Set = small_array.get(b.descriptor_sets, int(desc.set_index))
+	resource_view := (^D3D12_Descriptor)(desc.storage_buffer)
+	clear_values := [4]u32{desc.value, desc.value, desc.value, desc.value}
+
+	b.list->ClearUnorderedAccessViewUint(
+		get_descriptor_set_gpu_pointer(ds, desc.range_index, desc.descriptor_index),
+		resource_view.cpu_descriptor,
+		resource_view.resource,
+		&clear_values,
+		0,
+		nil,
+	)
+}
+
+cmd_clear_storage_texture :: proc(
+	instance: ^Instance,
+	cmd: ^Command_Buffer,
+	#by_ptr desc: Clear_Storage_Texture_Desc,
+) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+	ds: ^D3D12_Descriptor_Set = small_array.get(b.descriptor_sets, int(desc.set_index))
+	resource_view := (^D3D12_Descriptor)(desc.storage_texture)
+
+	clear_value := desc.value.(Color)
+	if resource_view.integer_format {
+		b.list->ClearUnorderedAccessViewUint(
+			get_descriptor_set_gpu_pointer(ds, desc.range_index, desc.descriptor_index),
+			resource_view.cpu_descriptor,
+			resource_view.resource,
+			&clear_value.(Colorui),
+			0,
+			nil,
+		)
+	} else {
+		b.list->ClearUnorderedAccessViewFloat(
+			get_descriptor_set_gpu_pointer(ds, desc.range_index, desc.descriptor_index),
+			resource_view.cpu_descriptor,
+			resource_view.resource,
+			&clear_value.(Colorf),
+			0,
+			nil,
+		)
+	}
+}
+
+cmd_begin_rendering :: proc(
+	instance: ^Instance,
+	cmd: ^Command_Buffer,
+	#by_ptr desc: Attachments_Desc,
+) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+	small_array.clear(&b.render_targets)
+
+	for attachment in desc.colors {
+		d: ^D3D12_Descriptor = (^D3D12_Descriptor)(attachment)
+		small_array.append(&b.render_targets, d.cpu_descriptor)
+	}
+
+	if desc.depth_stencil != nil {
+		d: ^D3D12_Descriptor = (^D3D12_Descriptor)(desc.depth_stencil)
+		b.depth_stencil = d.cpu_descriptor
+	} else do b.depth_stencil.ptr = 0
+
+	b.list->OMSetRenderTargets(
+		u32(small_array.len(b.render_targets)),
+		raw_data(small_array.slice(&b.render_targets)),
+		false,
+		&b.depth_stencil if b.depth_stencil.ptr != 0 else nil,
+	)
+}
+
+cmd_end_rendering :: proc(instance: ^Instance, cmd: ^Command_Buffer) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+	small_array.clear(&b.render_targets)
+}
+
+cmd_set_vertex_buffers :: proc(
+	instance: ^Instance,
+	cmd: ^Command_Buffer,
+	base_slot: u32,
+	buffers: []^Buffer,
+	offsets: []u64,
+) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+	vertex_buffer_views: small_array.Small_Array(16, d3d12.VERTEX_BUFFER_VIEW)
+	for buffer, i in buffers {
+		if buffer != nil {
+			buf: ^D3D12_Buffer = (^D3D12_Buffer)(buffer)
+			small_array.append(
+				&vertex_buffer_views,
+				d3d12.VERTEX_BUFFER_VIEW {
+					BufferLocation = buf.resource->GetGPUVirtualAddress() + offsets[base_slot],
+					SizeInBytes = win32.UINT(buf.desc.size - offsets[base_slot]),
+					StrideInBytes = b.pipeline.ia_strides[base_slot + u32(i)],
+				},
+			)
+		} else {
+			small_array.append(
+				&vertex_buffer_views,
+				d3d12.VERTEX_BUFFER_VIEW{BufferLocation = 0, SizeInBytes = 0, StrideInBytes = 0},
+			)
+		}
+	}
+
+	b.list->IASetVertexBuffers(
+		base_slot,
+		u32(small_array.len(vertex_buffer_views)),
+		raw_data(small_array.slice(&vertex_buffer_views)),
+	)
+}
+
+EN_INDEX_TYPE_TO_D3D12 := [Index_Type]dxgi.FORMAT {
+	.Uint16 = .R16_UINT,
+	.Uint32 = .R32_UINT,
+}
+
+cmd_set_index_buffer :: proc(
+	instance: ^Instance,
+	cmd: ^Command_Buffer,
+	buffer: ^Buffer,
+	offset: u64,
+	format: Index_Type,
+) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+	if buffer != nil {
+		buf: ^D3D12_Buffer = (^D3D12_Buffer)(buffer)
+		b.list->IASetIndexBuffer(
+			&d3d12.INDEX_BUFFER_VIEW {
+				BufferLocation = buf.resource->GetGPUVirtualAddress() + offset,
+				SizeInBytes = win32.UINT(buf.desc.size - offset),
+				Format = EN_INDEX_TYPE_TO_D3D12[format],
+			},
+		)
+	} else {
+		b.list->IASetIndexBuffer(nil)
+	}
+}
+
+cmd_set_pipeline_layout :: proc(
+	instance: ^Instance,
+	cmd: ^Command_Buffer,
+	layout: ^Pipeline_Layout,
+) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+	l := (^D3D12_Pipeline_Layout)(layout)
+	if l == b.pipeline_layout do return
+
+	b.pipeline_layout = l
+	b.is_graphics = l.is_graphics
+
+	if b.is_graphics {
+		b.list->SetGraphicsRootSignature(l.root_signature)
+	} else {
+		b.list->SetComputeRootSignature(l.root_signature)
+	}
+}
+
+cmd_set_pipeline :: proc(instance: ^Instance, cmd: ^Command_Buffer, pipeline: ^Pipeline) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+	p: ^D3D12_Pipeline = (^D3D12_Pipeline)(pipeline)
+	if p == b.pipeline do return
+
+	b.pipeline = p
+	b.list->SetPipelineState(p.pipeline)
+	if p.layout.is_graphics {
+		b.primitive_topology = p.topology
+		b.list->IASetPrimitiveTopology(p.topology)
+	}
+}
+
+cmd_set_descriptor_pool :: proc(
+	instance: ^Instance,
+	cmd: ^Command_Buffer,
+	pool: ^Descriptor_Pool,
+) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+	p: ^D3D12_Descriptor_Pool = (^D3D12_Descriptor_Pool)(pool)
+
+	b.list->SetDescriptorHeaps(
+		u32(small_array.len(p.heap_objects)),
+		raw_data(small_array.slice(&p.heap_objects)),
+	)
+}
+
+cmd_set_descriptor_set :: proc(
+	instance: ^Instance,
+	cmd: ^Command_Buffer,
+	set_index: u32,
+	set: ^Descriptor_Set,
+) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+	ds: ^D3D12_Descriptor_Set = (^D3D12_Descriptor_Set)(set)
+
+	small_array.set(&b.descriptor_sets, int(set_index), ds)
+}
+
+cmd_set_constants :: proc(instance: ^Instance, cmd: ^Command_Buffer, index: u32, data: []u32) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+
+	root_param_index := u32(b.pipeline_layout.base_root_constant) + index
+	root_constant_num := len(data) / 4
+
+	if b.is_graphics {
+		b.list->SetGraphicsRoot32BitConstants(
+			root_param_index,
+			u32(root_constant_num),
+			raw_data(data),
+			0,
+		)
+	} else {
+		b.list->SetComputeRoot32BitConstants(
+			root_param_index,
+			u32(root_constant_num),
+			raw_data(data),
+			0,
+		)
+	}
+}
+
+cmd_draw :: proc(instance: ^Instance, cmd: ^Command_Buffer, #by_ptr desc: Draw_Desc) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+	if b.pipeline_layout != nil && b.pipeline_layout.enable_draw_parameters {
+		base_vertex_instance: struct {
+			base_vertex:   u32,
+			base_instance: u32,
+		} = {desc.base_vertex, desc.base_instance}
+		b.list->SetGraphicsRoot32BitConstants(0, 2, (^u32)(&base_vertex_instance), 0)
+	}
+	b.list->DrawInstanced(desc.vertex_num, desc.instance_num, desc.base_vertex, desc.base_instance)
+}
+
+cmd_draw_indexed :: proc(
+	instance: ^Instance,
+	cmd: ^Command_Buffer,
+	#by_ptr desc: Draw_Indexed_Desc,
+) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+	if b.pipeline_layout != nil && b.pipeline_layout.enable_draw_parameters {
+		base_vertex_instance: struct {
+			base_vertex:   u32,
+			base_instance: u32,
+		} = {desc.base_vertex, desc.base_instance}
+		b.list->SetGraphicsRoot32BitConstants(0, 2, (^u32)(&base_vertex_instance), 0)
+	}
+	b.list->DrawIndexedInstanced(
+		desc.index_num,
+		desc.instance_num,
+		desc.base_index,
+		i32(desc.base_vertex),
+		desc.base_instance,
+	)
+}
+
+cmd_draw_indirect :: proc(
+	instance: ^Instance,
+	cmd: ^Command_Buffer,
+	buffer: ^Buffer,
+	offset: u64,
+	draw_num: u32,
+	stride: u32,
+	count_buffer: ^Buffer = nil,
+	count_buffer_offset: u64 = 0,
+) {
+	count_buffer_resource: ^d3d12.IResource
+	if count_buffer != nil {
+		count_buffer_resource = (^D3D12_Buffer)(count_buffer).resource
+	}
+
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+	b.list->ExecuteIndirect(
+		b.pipeline_layout.indirect_sig,
+		draw_num,
+		(^d3d12.IResource)((^D3D12_Buffer)(buffer).resource),
+		offset,
+		count_buffer_resource,
+		count_buffer_offset,
+	)
+}
+
+cmd_draw_indexed_indirect :: proc(
+	instance: ^Instance,
+	cmd: ^Command_Buffer,
+	buffer: ^Buffer,
+	offset: u64,
+	draw_num: u32,
+	stride: u32,
+	count_buffer: ^Buffer = nil,
+	count_buffer_offset: u64 = 0,
+) {
+	count_buffer_resource: ^d3d12.IResource
+	if count_buffer != nil {
+		count_buffer_resource = (^D3D12_Buffer)(count_buffer).resource
+	}
+
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+	b.list->ExecuteIndirect(
+		b.pipeline_layout.indirect_indexed_sig,
+		draw_num,
+		(^d3d12.IResource)((^D3D12_Buffer)(buffer).resource),
+		offset,
+		count_buffer_resource,
+		count_buffer_offset,
+	)
+}
+
+cmd_copy_buffer :: proc(
+	instance: ^Instance,
+	cmd: ^Command_Buffer,
+	dst: ^Buffer,
+	dst_offset: u64,
+	src: ^Buffer,
+	src_offset: u64,
+	size: u64,
+) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+	size := size
+	if size == WHOLE_SIZE do size = (^D3D12_Buffer)(src).desc.size
+
+	b.list->CopyBufferRegion(
+		(^d3d12.IResource)((^D3D12_Buffer)(dst).resource),
+		dst_offset,
+		(^d3d12.IResource)((^D3D12_Buffer)(src).resource),
+		src_offset,
+		size,
+	)
+}
+
+cmd_copy_texture :: proc(
+	instance: ^Instance,
+	cmd: ^Command_Buffer,
+	dst: ^Texture,
+	dst_region: ^Texture_Region_Desc,
+	src: ^Texture,
+	src_region: ^Texture_Region_Desc,
+) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+	d: ^D3D12_Texture = (^D3D12_Texture)(dst)
+	s: ^D3D12_Texture = (^D3D12_Texture)(src)
+
+	src_region := src_region
+	dst_region := dst_region
+
+	is_whole := src_region == nil || dst_region == nil
+	if is_whole {
+		b.list->CopyResource(d.resource, s.resource)
+		return
+	}
+
+	whole_resource: Texture_Region_Desc
+	if src_region == nil do src_region = &whole_resource
+	if dst_region == nil do dst_region = &whole_resource
+
+	dst_texture_copy_location: d3d12.TEXTURE_COPY_LOCATION
+	dst_texture_copy_location.pResource = d.resource
+	dst_texture_copy_location.Type = .SUBRESOURCE_INDEX
+	dst_texture_copy_location.SubresourceIndex = get_texture_subresource_index(
+		d.desc,
+		u32(dst_region.layer_offset),
+		u32(dst_region.mip_offset),
+	)
+
+	src_texture_copy_location: d3d12.TEXTURE_COPY_LOCATION
+	src_texture_copy_location.pResource = s.resource
+	src_texture_copy_location.Type = .SUBRESOURCE_INDEX
+	src_texture_copy_location.SubresourceIndex = get_texture_subresource_index(
+		s.desc,
+		u32(src_region.layer_offset),
+		u32(src_region.mip_offset),
+	)
+
+	size: [3]u32
+	size.x =
+		u32(get_dimension_mip_adjusted(s.desc, 0, src_region.mip_offset)) if src_region.width == WHOLE_SIZE else u32(src_region.width)
+	size.y =
+		u32(get_dimension_mip_adjusted(s.desc, 1, src_region.mip_offset)) if src_region.height == WHOLE_SIZE else u32(src_region.height)
+	size.z =
+		u32(get_dimension_mip_adjusted(s.desc, 2, src_region.mip_offset)) if src_region.depth == WHOLE_SIZE else u32(src_region.depth)
+
+	box: d3d12.BOX
+	box.left = u32(src_region.x)
+	box.top = u32(src_region.y)
+	box.front = u32(src_region.z)
+	box.right = u32(src_region.x + u16(size.x))
+	box.bottom = u32(src_region.y + u16(size.y))
+	box.back = u32(src_region.z + u16(size.z))
+
+	b.list->CopyTextureRegion(
+		&dst_texture_copy_location,
+		u32(dst_region.x),
+		u32(dst_region.y),
+		u32(dst_region.z),
+		&src_texture_copy_location,
+		&box,
+	)
+}
+
+cmd_resolve_texture :: proc(
+	instance: ^Instance,
+	cmd: ^Command_Buffer,
+	dst: ^Texture,
+	dst_region: ^Texture_Region_Desc,
+	src: ^Texture,
+	src_region: ^Texture_Region_Desc,
+) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+	d: ^D3D12_Texture = (^D3D12_Texture)(dst)
+	s: ^D3D12_Texture = (^D3D12_Texture)(src)
+
+	src_region := src_region
+	dst_region := dst_region
+
+	is_whole := src_region == nil || dst_region == nil
+	if is_whole {
+		for layer in 0 ..< d.desc.layer_num {
+			for mip in 0 ..< d.desc.mip_num {
+				subresource := get_texture_subresource_index(d.desc, u32(layer), u32(mip))
+				b.list->ResolveSubresource(
+					d.resource,
+					subresource,
+					s.resource,
+					subresource,
+					EN_TO_DXGI_FORMAT_TYPED[d.desc.format],
+				)
+			}
+		}
+		return
+	}
+
+	whole_resource: Texture_Region_Desc
+	if src_region == nil do src_region = &whole_resource
+	if dst_region == nil do dst_region = &whole_resource
+
+	dst_subresource := get_texture_subresource_index(
+		d.desc,
+		u32(dst_region.layer_offset),
+		u32(dst_region.mip_offset),
+	)
+	src_subresource := get_texture_subresource_index(
+		s.desc,
+		u32(src_region.layer_offset),
+		u32(src_region.mip_offset),
+	)
+
+	src_rect: d3d12.RECT
+	src_rect.left = i32(src_region.x)
+	src_rect.top = i32(src_region.y)
+	src_rect.right = i32(src_region.x + u16(src_region.width))
+	src_rect.bottom = i32(src_region.y + u16(src_region.height))
+
+	b.list->ResolveSubresourceRegion(
+		d.resource,
+		dst_subresource,
+		u32(dst_region.x),
+		u32(dst_region.y),
+		s.resource,
+		src_subresource,
+		&src_rect,
+		EN_TO_DXGI_FORMAT_TYPED[d.desc.format],
+		.AVERAGE,
+	)
+}
+
+cmd_upload_buffer_to_texture :: proc(
+	instance: ^Instance,
+	cmd: ^Command_Buffer,
+	dst: ^Texture,
+	dst_region: Texture_Region_Desc,
+	src: ^Buffer,
+	src_data_layout: Texture_Data_Layout_Desc,
+) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+	d: ^D3D12_Texture = (^D3D12_Texture)(dst)
+	s: ^D3D12_Buffer = (^D3D12_Buffer)(src)
+
+	dst_texture_copy_location: d3d12.TEXTURE_COPY_LOCATION
+	dst_texture_copy_location.pResource = d.resource
+	dst_texture_copy_location.Type = .SUBRESOURCE_INDEX
+	dst_texture_copy_location.SubresourceIndex = get_texture_subresource_index(
+		d.desc,
+		u32(dst_region.layer_offset),
+		u32(dst_region.mip_offset),
+	)
+
+	size: [3]u32
+	size.x = u32(
+		get_dimension_mip_adjusted(d.desc, 0, dst_region.mip_offset) if dst_region.width == WHOLE_SIZE else dst_region.width,
+	)
+	size.y = u32(
+		get_dimension_mip_adjusted(d.desc, 1, dst_region.mip_offset) if dst_region.height == WHOLE_SIZE else dst_region.height,
+	)
+	size.z = u32(
+		get_dimension_mip_adjusted(d.desc, 2, dst_region.mip_offset) if dst_region.depth == WHOLE_SIZE else dst_region.depth,
+	)
+
+	src_texture_copy_location: d3d12.TEXTURE_COPY_LOCATION
+	src_texture_copy_location.pResource = s.resource
+	src_texture_copy_location.Type = .PLACED_FOOTPRINT
+	src_texture_copy_location.PlacedFootprint.Offset = src_data_layout.offset
+	src_texture_copy_location.PlacedFootprint.Footprint.Format =
+		EN_TO_DXGI_FORMAT_TYPELESS[d.desc.format]
+	src_texture_copy_location.PlacedFootprint.Footprint.Width = size.x
+	src_texture_copy_location.PlacedFootprint.Footprint.Height = size.y
+	src_texture_copy_location.PlacedFootprint.Footprint.Depth = size.z
+	src_texture_copy_location.PlacedFootprint.Footprint.RowPitch = src_data_layout.row_pitch
+
+	box: d3d12.BOX
+	box.left = u32(dst_region.x)
+	box.top = u32(dst_region.y)
+	box.front = u32(dst_region.z)
+	box.right = u32(dst_region.x + u16(size.x))
+	box.bottom = u32(dst_region.y + u16(size.y))
+	box.back = u32(dst_region.z + u16(size.z))
+
+	b.list->CopyTextureRegion(
+		&dst_texture_copy_location,
+		u32(dst_region.x),
+		u32(dst_region.y),
+		u32(dst_region.z),
+		&src_texture_copy_location,
+		&box,
+	)
+}
+
+cmd_readback_texture_to_buffer :: proc(
+	instance: ^Instance,
+	cmd: ^Command_Buffer,
+	dst_buffer: ^Buffer,
+	dst_data_layout: Texture_Data_Layout_Desc,
+	src_texture: ^Texture,
+	src_region: Texture_Region_Desc,
+) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+	d: ^D3D12_Buffer = (^D3D12_Buffer)(dst_buffer)
+	s: ^D3D12_Texture = (^D3D12_Texture)(src_texture)
+
+	src_texture_copy_location: d3d12.TEXTURE_COPY_LOCATION
+	src_texture_copy_location.pResource = (^D3D12_Texture)(src_texture).resource
+	src_texture_copy_location.Type = .SUBRESOURCE_INDEX
+	src_texture_copy_location.SubresourceIndex = get_texture_subresource_index(
+		s.desc,
+		u32(src_region.layer_offset),
+		u32(src_region.mip_offset),
+	)
+
+	dst_texture_copy_location: d3d12.TEXTURE_COPY_LOCATION
+	dst_texture_copy_location.pResource = (^D3D12_Buffer)(dst_buffer).resource
+	dst_texture_copy_location.Type = .PLACED_FOOTPRINT
+	dst_texture_copy_location.PlacedFootprint.Offset = dst_data_layout.offset
+	dst_texture_copy_location.PlacedFootprint.Footprint.Format =
+		EN_TO_DXGI_FORMAT_TYPELESS[s.desc.format]
+	dst_texture_copy_location.PlacedFootprint.Footprint.Width = u32(src_region.width)
+	dst_texture_copy_location.PlacedFootprint.Footprint.Height = u32(src_region.height)
+	dst_texture_copy_location.PlacedFootprint.Footprint.Depth = u32(src_region.depth)
+	dst_texture_copy_location.PlacedFootprint.Footprint.RowPitch = dst_data_layout.row_pitch
+
+	size: [3]u32
+	size.x = u32(
+		get_dimension_mip_adjusted(s.desc, 0, src_region.mip_offset) if src_region.width == WHOLE_SIZE else src_region.width,
+	)
+	size.y = u32(
+		get_dimension_mip_adjusted(s.desc, 1, src_region.mip_offset) if src_region.height == WHOLE_SIZE else src_region.height,
+	)
+	size.z = u32(
+		get_dimension_mip_adjusted(s.desc, 2, src_region.mip_offset) if src_region.depth == WHOLE_SIZE else src_region.depth,
+	)
+
+	box: d3d12.BOX
+	box.left = u32(src_region.x)
+	box.top = u32(src_region.y)
+	box.front = u32(src_region.z)
+	box.right = u32(src_region.x + u16(size.x))
+	box.bottom = u32(src_region.y + u16(size.y))
+	box.back = u32(src_region.z + u16(size.z))
+
+	b.list->CopyTextureRegion(
+		&dst_texture_copy_location,
+		0,
+		0,
+		0,
+		&src_texture_copy_location,
+		&box,
+	)
+}
+
+cmd_dispatch :: proc(instance: ^Instance, cmd: ^Command_Buffer, groups: [3]u32) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+	b.list->Dispatch(groups[0], groups[1], groups[2])
+}
+
+cmd_dispatch_indirect :: proc(
+	instance: ^Instance,
+	cmd: ^Command_Buffer,
+	buffer: ^Buffer,
+	offset: u64,
+) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+
+	b.list->ExecuteIndirect(
+		b.allocator.queue.device.indirect_dispatch_sig,
+		1,
+		(^D3D12_Buffer)(buffer).resource,
+		offset,
+		nil,
+		0,
+	)
+}
+
+cmd_barrier :: proc(instance: ^Instance, cmd: ^Command_Buffer, #by_ptr desc: Barrier_Group_Desc) {
+	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
+	@(static) barriers: small_array.Small_Array(512, d3d12.RESOURCE_BARRIER)
+	small_array.clear(&barriers)
+
+	barrier_count := len(desc.buffers)
+
+	for texture_barrier in desc.textures {
+		t: ^D3D12_Texture = (^D3D12_Texture)(texture_barrier.texture)
+		layer_num :=
+			t.desc.layer_num if texture_barrier.layer_num == REMAINING_LAYERS else texture_barrier.layer_num
+		mip_num :=
+			t.desc.mip_num if texture_barrier.mip_num == REMAINING_MIPS else texture_barrier.mip_num
+
+		if texture_barrier.layer_offset == 0 &&
+		   layer_num == t.desc.layer_num &&
+		   texture_barrier.mip_offset == 0 &&
+		   mip_num == t.desc.mip_num {
+			barrier_count += 1
+		} else {
+			barrier_count += int(layer_num * u16(mip_num))
+		}
+	}
+
+	global_uav_needed := false
+	for global_barrier in desc.globals {
+		if .Shader_Resource_Storage in global_barrier.before.access &&
+		   .Shader_Resource_Storage in global_barrier.after.access {
+			global_uav_needed = true
+			break
+		}
+	}
+
+	if global_uav_needed do barrier_count += 1
+	if barrier_count == 0 do return
+
+	temp := make([]d3d12.RESOURCE_BARRIER, barrier_count, allocator = context.temp_allocator)
+	index := 0
+
+	for barrier in desc.buffers {
+		temp[index] = resource_barrier(
+			b.allocator.type,
+			((^D3D12_Buffer)(barrier.buffer)).resource,
+			barrier.before.access,
+			barrier.after.access,
+			0,
+		)
+		index += 1
+	}
+
+	for barrier in desc.textures {
+		t: ^D3D12_Texture = (^D3D12_Texture)(barrier.texture)
+		layer_num :=
+			t.desc.layer_num if barrier.layer_num == REMAINING_LAYERS else barrier.layer_num
+		mip_num := t.desc.mip_num if barrier.mip_num == REMAINING_MIPS else barrier.mip_num
+
+		if barrier.layer_offset == 0 &&
+		   layer_num == t.desc.layer_num &&
+		   barrier.mip_offset == 0 &&
+		   mip_num == t.desc.mip_num {
+			temp[index] = resource_barrier(
+				b.allocator.type,
+				t.resource,
+				barrier.before.access,
+				barrier.after.access,
+				d3d12.RESOURCE_BARRIER_ALL_SUBRESOURCES,
+			)
+		} else {
+			for layer in 0 ..< layer_num {
+				for mip in 0 ..< mip_num {
+					temp[index] = resource_barrier(
+						b.allocator.type,
+						t.resource,
+						barrier.before.access,
+						barrier.after.access,
+						get_texture_subresource_index(
+							t.desc,
+							u32(layer),
+							u32(mip),
+							barrier.planes,
+						),
+					)
+					index += 1
+				}
+			}
+		}
+	}
+
+	if global_uav_needed {
+		temp[index].Type = .UAV
+		temp[index].UAV.pResource = nil
+	}
+
+	b.list->ResourceBarrier(u32(barrier_count), raw_data(temp))
+}
+
+get_resource_states :: proc(
+	mask: Access_Flags,
+	type: d3d12.COMMAND_LIST_TYPE,
+) -> (
+	states: d3d12.RESOURCE_STATES,
+) {
+	if .Constant_Buffer in mask || .Vertex_Buffer in mask do states += {.VERTEX_AND_CONSTANT_BUFFER}
+	if .Index_Buffer in mask do states += {.INDEX_BUFFER}
+	if .Argument_Buffer in mask do states += {.INDIRECT_ARGUMENT}
+	if .Shader_Resource_Storage in mask do states += {.UNORDERED_ACCESS}
+	if .Color_Attachment in mask do states += {.RENDER_TARGET}
+	if .Depth_Stencil_Attachment_Read in mask do states += {.DEPTH_READ}
+	if .Depth_Stencil_Attachment_Write in mask do states += {.DEPTH_WRITE}
+	if .Copy_Source in mask do states += {.COPY_SOURCE}
+	if .Copy_Destination in mask do states += {.COPY_DEST}
+	if .Resolve_Source in mask do states += {.RESOLVE_SOURCE}
+	if .Resolve_Destination in mask do states += {.RESOLVE_DEST}
+	if .Shader_Resource in mask {
+		states += {.PIXEL_SHADER_RESOURCE, .NON_PIXEL_SHADER_RESOURCE}
+		// if type == .DIRECT do states += {.PIXEL_SHADER_RESOURCE}
+	}
+	if .Acceleration_Structure_Read in mask do states += {.RAYTRACING_ACCELERATION_STRUCTURE}
+	if .Acceleration_Structure_Write in mask do states += {.UNORDERED_ACCESS}
+	if .Shading_Rate_Attachment in mask do states += {.SHADING_RATE_SOURCE}
+	return
+}
+
+resource_barrier :: proc(
+	type: d3d12.COMMAND_LIST_TYPE,
+	resource: ^d3d12.IResource,
+	before, after: Access_Flags,
+	subresource: u32,
+) -> (
+	barrier: d3d12.RESOURCE_BARRIER,
+) {
+	state_before := get_resource_states(before, type)
+	state_after := get_resource_states(after, type)
+
+	if state_before == state_after && state_before == {.UNORDERED_ACCESS} {
+		barrier.Type = .UAV
+		barrier.UAV.pResource = resource
+	} else {
+		barrier.Type = .TRANSITION
+		barrier.Transition.pResource = resource
+		barrier.Transition.StateBefore = state_before
+		barrier.Transition.StateAfter = state_after
+		barrier.Transition.Subresource = subresource
+	}
+	return
 }
 
 D3D12_Command_Queue :: struct {
@@ -913,7 +1977,7 @@ create_1d_texture_view :: proc(
 	switch desc.view_type {
 	case .Shader_Resource:
 		srv_desc: d3d12.SHADER_RESOURCE_VIEW_DESC
-		srv_desc.Format = EN_TO_DXGI_FORMAT[texture_desc.format]
+		srv_desc.Format = EN_TO_DXGI_FORMAT_TYPED[texture_desc.format]
 		srv_desc.ViewDimension = .TEXTURE1D
 		srv_desc.Shader4ComponentMapping = DEFAULT_SHADER_4_COMPONENT_MAPPING
 		srv_desc.Texture1D.MostDetailedMip = u32(desc.mip_offset)
@@ -922,7 +1986,7 @@ create_1d_texture_view :: proc(
 		return
 	case .Shader_Resource_Array:
 		srv_desc: d3d12.SHADER_RESOURCE_VIEW_DESC
-		srv_desc.Format = EN_TO_DXGI_FORMAT[texture_desc.format]
+		srv_desc.Format = EN_TO_DXGI_FORMAT_TYPED[texture_desc.format]
 		srv_desc.ViewDimension = .TEXTURE1DARRAY
 		srv_desc.Shader4ComponentMapping = DEFAULT_SHADER_4_COMPONENT_MAPPING
 		srv_desc.Texture1DArray.MostDetailedMip = u32(desc.mip_offset)
@@ -933,14 +1997,14 @@ create_1d_texture_view :: proc(
 		return
 	case .Shader_Resource_Storage:
 		uav_desc: d3d12.UNORDERED_ACCESS_VIEW_DESC
-		uav_desc.Format = EN_TO_DXGI_FORMAT[texture_desc.format]
+		uav_desc.Format = EN_TO_DXGI_FORMAT_TYPED[texture_desc.format]
 		uav_desc.ViewDimension = .TEXTURE1D
 		uav_desc.Texture1D.MipSlice = u32(desc.mip_offset)
 		create_uav(d, descriptor, t.resource, uav_desc, texture_desc.format) or_return
 		return
 	case .Shader_Resource_Storage_Array:
 		uav_desc: d3d12.UNORDERED_ACCESS_VIEW_DESC
-		uav_desc.Format = EN_TO_DXGI_FORMAT[texture_desc.format]
+		uav_desc.Format = EN_TO_DXGI_FORMAT_TYPED[texture_desc.format]
 		uav_desc.ViewDimension = .TEXTURE1DARRAY
 		uav_desc.Texture1DArray.MipSlice = u32(desc.mip_offset)
 		uav_desc.Texture1DArray.FirstArraySlice = u32(desc.layer_offset)
@@ -949,7 +2013,7 @@ create_1d_texture_view :: proc(
 		return
 	case .Color_Attachment:
 		rtv_desc: d3d12.RENDER_TARGET_VIEW_DESC
-		rtv_desc.Format = EN_TO_DXGI_FORMAT[texture_desc.format]
+		rtv_desc.Format = EN_TO_DXGI_FORMAT_TYPED[texture_desc.format]
 		rtv_desc.ViewDimension = .TEXTURE1D
 		rtv_desc.Texture1D.MipSlice = u32(desc.mip_offset)
 		create_rtv(d, descriptor, t.resource, rtv_desc) or_return
@@ -959,7 +2023,7 @@ create_1d_texture_view :: proc(
 	     .Depth_Attachment_Stencil_Readonly,
 	     .Depth_Readonly_Stencil_Attachment:
 		dsv_desc: d3d12.DEPTH_STENCIL_VIEW_DESC
-		dsv_desc.Format = EN_TO_DXGI_FORMAT[texture_desc.format]
+		dsv_desc.Format = EN_TO_DXGI_FORMAT_TYPED[texture_desc.format]
 		dsv_desc.ViewDimension = .TEXTURE1DARRAY
 		dsv_desc.Texture1DArray.MipSlice = u32(desc.mip_offset)
 		dsv_desc.Texture1DArray.FirstArraySlice = u32(desc.layer_offset)
@@ -1031,10 +2095,11 @@ create_2d_texture_view :: proc(
 	remaining_layers :=
 		(texture_desc.layer_num - desc.layer_offset) if desc.layer_num == REMAINING_LAYERS else desc.layer_num
 
+	out_descriptor = (^Descriptor)(descriptor)
 	switch desc.view_type {
 	case .Shader_Resource:
 		srv_desc: d3d12.SHADER_RESOURCE_VIEW_DESC
-		srv_desc.Format = format_for_depth(EN_TO_DXGI_FORMAT[texture_desc.format])
+		srv_desc.Format = format_for_depth(EN_TO_DXGI_FORMAT_TYPED[texture_desc.format])
 		srv_desc.Shader4ComponentMapping = DEFAULT_SHADER_4_COMPONENT_MAPPING
 		if texture_desc.sample_num > 1 {
 			srv_desc.ViewDimension = .TEXTURE2DMS
@@ -1048,7 +2113,7 @@ create_2d_texture_view :: proc(
 		return
 	case .Shader_Resource_Array:
 		srv_desc: d3d12.SHADER_RESOURCE_VIEW_DESC
-		srv_desc.Format = format_for_depth(EN_TO_DXGI_FORMAT[texture_desc.format])
+		srv_desc.Format = format_for_depth(EN_TO_DXGI_FORMAT_TYPED[texture_desc.format])
 		srv_desc.Shader4ComponentMapping = DEFAULT_SHADER_4_COMPONENT_MAPPING
 		if (texture_desc.sample_num > 1) {
 			srv_desc.ViewDimension = .TEXTURE2DMSARRAY
@@ -1066,7 +2131,7 @@ create_2d_texture_view :: proc(
 		return
 	case .Shader_Resource_Cube:
 		srv_desc: d3d12.SHADER_RESOURCE_VIEW_DESC
-		srv_desc.Format = format_for_depth(EN_TO_DXGI_FORMAT[texture_desc.format])
+		srv_desc.Format = format_for_depth(EN_TO_DXGI_FORMAT_TYPED[texture_desc.format])
 		srv_desc.Shader4ComponentMapping = DEFAULT_SHADER_4_COMPONENT_MAPPING
 		srv_desc.ViewDimension = .TEXTURECUBE
 		srv_desc.TextureCube.MostDetailedMip = u32(desc.mip_offset)
@@ -1075,7 +2140,7 @@ create_2d_texture_view :: proc(
 		return
 	case .Shader_Resource_Cube_Array:
 		srv_desc: d3d12.SHADER_RESOURCE_VIEW_DESC
-		srv_desc.Format = format_for_depth(EN_TO_DXGI_FORMAT[texture_desc.format])
+		srv_desc.Format = format_for_depth(EN_TO_DXGI_FORMAT_TYPED[texture_desc.format])
 		srv_desc.Shader4ComponentMapping = DEFAULT_SHADER_4_COMPONENT_MAPPING
 		srv_desc.ViewDimension = .TEXTURECUBEARRAY
 		srv_desc.TextureCubeArray.MostDetailedMip = u32(desc.mip_offset)
@@ -1086,7 +2151,7 @@ create_2d_texture_view :: proc(
 		return
 	case .Shader_Resource_Storage:
 		uav_desc: d3d12.UNORDERED_ACCESS_VIEW_DESC
-		uav_desc.Format = EN_TO_DXGI_FORMAT[texture_desc.format]
+		uav_desc.Format = EN_TO_DXGI_FORMAT_TYPED[texture_desc.format]
 		uav_desc.ViewDimension = .TEXTURE2D
 		uav_desc.Texture2D.MipSlice = u32(desc.mip_offset)
 		uav_desc.Texture2D.PlaneSlice = get_plane_index(texture_desc.format)
@@ -1094,7 +2159,7 @@ create_2d_texture_view :: proc(
 		return
 	case .Shader_Resource_Storage_Array:
 		uav_desc: d3d12.UNORDERED_ACCESS_VIEW_DESC
-		uav_desc.Format = EN_TO_DXGI_FORMAT[texture_desc.format]
+		uav_desc.Format = EN_TO_DXGI_FORMAT_TYPED[texture_desc.format]
 		uav_desc.ViewDimension = .TEXTURE2DARRAY
 		uav_desc.Texture2DArray.MipSlice = u32(desc.mip_offset)
 		uav_desc.Texture2DArray.FirstArraySlice = u32(desc.layer_offset)
@@ -1104,7 +2169,7 @@ create_2d_texture_view :: proc(
 		return
 	case .Color_Attachment:
 		rtv_desc: d3d12.RENDER_TARGET_VIEW_DESC
-		rtv_desc.Format = EN_TO_DXGI_FORMAT[texture_desc.format]
+		rtv_desc.Format = EN_TO_DXGI_FORMAT_TYPED[texture_desc.format]
 		rtv_desc.ViewDimension = .TEXTURE2DARRAY
 		rtv_desc.Texture2DArray.MipSlice = u32(desc.mip_offset)
 		rtv_desc.Texture2DArray.FirstArraySlice = u32(desc.layer_offset)
@@ -1117,7 +2182,7 @@ create_2d_texture_view :: proc(
 	     .Depth_Attachment_Stencil_Readonly,
 	     .Depth_Readonly_Stencil_Attachment:
 		dsv_desc: d3d12.DEPTH_STENCIL_VIEW_DESC
-		dsv_desc.Format = EN_TO_DXGI_FORMAT[texture_desc.format]
+		dsv_desc.Format = EN_TO_DXGI_FORMAT_TYPED[texture_desc.format]
 		dsv_desc.ViewDimension = .TEXTURE2DARRAY
 		dsv_desc.Texture2DArray.MipSlice = u32(desc.mip_offset)
 		dsv_desc.Texture2DArray.FirstArraySlice = u32(desc.layer_offset)
@@ -1168,7 +2233,7 @@ create_3d_texture_view :: proc(
 	switch desc.view_type {
 	case .Shader_Resource:
 		srv_desc: d3d12.SHADER_RESOURCE_VIEW_DESC
-		srv_desc.Format = EN_TO_DXGI_FORMAT[texture_desc.format]
+		srv_desc.Format = EN_TO_DXGI_FORMAT_TYPED[texture_desc.format]
 		srv_desc.ViewDimension = .TEXTURE3D
 		srv_desc.Shader4ComponentMapping = DEFAULT_SHADER_4_COMPONENT_MAPPING
 		srv_desc.Texture3D.MostDetailedMip = u32(desc.mip_offset)
@@ -1177,7 +2242,7 @@ create_3d_texture_view :: proc(
 		return
 	case .Shader_Resource_Storage:
 		uav_desc: d3d12.UNORDERED_ACCESS_VIEW_DESC
-		uav_desc.Format = EN_TO_DXGI_FORMAT[texture_desc.format]
+		uav_desc.Format = EN_TO_DXGI_FORMAT_TYPED[texture_desc.format]
 		uav_desc.ViewDimension = .TEXTURE3D
 		uav_desc.Texture3D.MipSlice = u32(desc.mip_offset)
 		uav_desc.Texture3D.FirstWSlice = u32(desc.slice_offset)
@@ -1186,7 +2251,7 @@ create_3d_texture_view :: proc(
 		return
 	case .Color_Attachment:
 		rtv_desc: d3d12.RENDER_TARGET_VIEW_DESC
-		rtv_desc.Format = EN_TO_DXGI_FORMAT[texture_desc.format]
+		rtv_desc.Format = EN_TO_DXGI_FORMAT_TYPED[texture_desc.format]
 		rtv_desc.ViewDimension = .TEXTURE3D
 		rtv_desc.Texture3D.MipSlice = u32(desc.mip_offset)
 		rtv_desc.Texture3D.FirstWSlice = u32(desc.slice_offset)
@@ -1218,7 +2283,7 @@ create_buffer_view :: proc(
 	buffer_desc := b.desc
 	size := buffer_desc.size if desc.size == WHOLE_SIZE else desc.size
 
-	format := EN_TO_DXGI_FORMAT[desc.format]
+	format := EN_TO_DXGI_FORMAT_TYPED[desc.format]
 	props := FORMAT_PROPS[desc.format]
 	element_size :=
 		buffer_desc.structure_stride if buffer_desc.structure_stride > 0 else u32(props.stride)
@@ -1364,6 +2429,7 @@ create_sampler :: proc(
 
 	d.device->CreateSampler(&sampler_desc, descriptor.cpu_descriptor)
 
+	out_sampler = (^Descriptor)(descriptor)
 	return
 }
 
@@ -1371,7 +2437,7 @@ destroy_descriptor :: proc(instance: ^Instance, device: ^Device, descriptor: ^De
 	d: ^D3D12_Device = (^D3D12_Device)(device)
 	d3d12_descriptor: ^D3D12_Descriptor = (^D3D12_Descriptor)(descriptor)
 	free_cpu_descriptor(d, d3d12_descriptor.handle)
-	free(d)
+	free(d3d12_descriptor)
 }
 
 set_descriptor_debug_name :: proc(
@@ -1396,10 +2462,10 @@ D3D12_Descriptor_Heap :: struct {
 
 D3D12_Descriptor_Pool :: struct {
 	using _:         Descriptor_Pool,
+	device:          ^D3D12_Device,
 	// CBV/SRV/UAV and Sampler heaps
 	heap_info:       [D3D12_Descriptor_Type]D3D12_Descriptor_Heap,
-	heap_objects:    [D3D12_Descriptor_Type]^d3d12.IDescriptorHeap,
-	heap_num:        u32,
+	heap_objects:    small_array.Small_Array(2, ^d3d12.IDescriptorHeap),
 	descriptor_sets: [dynamic]D3D12_Descriptor_Set,
 }
 
@@ -1418,6 +2484,7 @@ create_descriptor_pool :: proc(
 		return
 	}
 
+	pool.device = d
 	heap_sizes: [D3D12_Descriptor_Type]u32
 	heap_sizes[.Resource] += desc.constant_buffer_max_num
 	heap_sizes[.Resource] += desc.texture_max_num
@@ -1434,7 +2501,6 @@ create_descriptor_pool :: proc(
 		info.num_descriptors = num
 
 		if num == 0 do continue
-		pool.heap_num += 1
 
 		desc: d3d12.DESCRIPTOR_HEAP_DESC
 		desc.Type = .CBV_SRV_UAV if type == .Resource else .SAMPLER
@@ -1455,7 +2521,7 @@ create_descriptor_pool :: proc(
 		info.heap->GetGPUDescriptorHandleForHeapStart(&info.base_gpu_descriptor)
 		info.descriptor_size = d.device->GetDescriptorHandleIncrementSize(desc.Type)
 
-		pool.heap_objects[type] = info.heap
+		small_array.append(&pool.heap_objects, info.heap)
 	}
 
 	resize(&pool.descriptor_sets, desc.descriptor_set_max_num)
@@ -1467,11 +2533,12 @@ create_descriptor_pool :: proc(
 
 destroy_descriptor_pool :: proc(instance: ^Instance, pool: ^Descriptor_Pool) {
 	p: ^D3D12_Descriptor_Pool = (^D3D12_Descriptor_Pool)(pool)
-	for heap in p.heap_objects {
+	for heap in small_array.slice(&p.heap_objects) {
 		if heap != nil {
 			heap->Release()
 		}
 	}
+	delete(p.descriptor_sets)
 
 	free(p)
 }
@@ -1484,7 +2551,7 @@ set_descriptor_pool_debug_name :: proc(
 	error: mem.Allocator_Error,
 ) {
 	p: ^D3D12_Descriptor_Pool = (^D3D12_Descriptor_Pool)(pool)
-	for &heap, type in p.heap_objects {
+	for &heap in small_array.slice(&p.heap_objects) {
 		if heap != nil {
 			set_debug_name(heap, name)
 		}
@@ -1555,6 +2622,7 @@ allocate_descriptor_set :: proc(
 		return
 	}
 	set := D3D12_Descriptor_Set{}
+	set.pool = p
 
 	assert(len(desc.ranges) <= MAX_RANGES_PER_DESCRIPTOR_SET)
 	for range_desc, range_index in desc.ranges {
@@ -1566,10 +2634,7 @@ allocate_descriptor_set :: proc(
 		}
 		small_array.append(
 			&set.ranges,
-			D3D12_Descriptor_Range {
-				range = range_desc,
-				gpu_handle = get_gpu_pointer_from_descriptor_pool(p, type, index),
-			},
+			D3D12_Descriptor_Range{range = range_desc, heap_type = type, heap_offset = index},
 		)
 	}
 
@@ -1592,12 +2657,62 @@ reset_descriptor_pool :: proc(instance: ^Instance, pool: ^Descriptor_Pool) {
 }
 
 D3D12_Descriptor_Range :: struct {
-	range:      Descriptor_Range_Desc,
-	gpu_handle: d3d12.GPU_DESCRIPTOR_HANDLE,
+	range:       Descriptor_Range_Desc,
+	heap_type:   D3D12_Descriptor_Type,
+	heap_offset: u32,
 }
 
 D3D12_Descriptor_Set :: struct {
+	pool:   ^D3D12_Descriptor_Pool,
 	ranges: small_array.Small_Array(MAX_RANGES_PER_DESCRIPTOR_SET, D3D12_Descriptor_Range),
+}
+
+get_descriptor_set_cpu_pointer :: proc(
+	set: ^D3D12_Descriptor_Set,
+	index, offset: u32,
+) -> d3d12.CPU_DESCRIPTOR_HANDLE {
+	range := small_array.get(set.ranges, int(index))
+	heap_offset := offset + range.heap_offset
+	return get_cpu_pointer_from_descriptor_pool(set.pool, range.heap_type, offset)
+}
+
+get_descriptor_set_gpu_pointer :: proc(
+	set: ^D3D12_Descriptor_Set,
+	index, offset: u32,
+) -> d3d12.GPU_DESCRIPTOR_HANDLE {
+	range := small_array.get(set.ranges, int(index))
+	heap_offset := offset + range.heap_offset
+	return get_gpu_pointer_from_descriptor_pool(set.pool, range.heap_type, offset)
+}
+
+update_descriptor_ranges :: proc(
+	instance: ^Instance,
+	set: ^Descriptor_Set,
+	base_range: u32,
+	ranges: []Descriptor_Range_Update_Desc,
+) {
+	ds: ^D3D12_Descriptor_Set = (^D3D12_Descriptor_Set)(set)
+	p: ^D3D12_Descriptor_Pool = ds.pool
+	d3d12_ranges := small_array.slice(&ds.ranges)
+	for range, i in ranges {
+		d3d12_range := d3d12_ranges[int(base_range) + i]
+		offset := range.base_descriptor + d3d12_range.heap_offset
+
+		for descriptor_index in 0 ..< len(range.descriptors) {
+			dst := get_cpu_pointer_from_descriptor_pool(
+				p,
+				d3d12_range.heap_type,
+				offset + u32(descriptor_index),
+			)
+			src := (^D3D12_Descriptor)(range.descriptors[descriptor_index]).cpu_descriptor
+			p.device.device->CopyDescriptorsSimple(
+				1,
+				dst,
+				src,
+				d3d12.DESCRIPTOR_HEAP_TYPE(d3d12_range.heap_type),
+			)
+		}
+	}
 }
 
 D3D12_Fence :: struct {
@@ -1606,7 +2721,14 @@ D3D12_Fence :: struct {
 	event:   win32.HANDLE,
 }
 
-create_fence :: proc(instance: ^Instance, device: ^Device) -> (out_fence: ^Fence, error: Error) {
+create_fence :: proc(
+	instance: ^Instance,
+	device: ^Device,
+	initial_value: u64,
+) -> (
+	out_fence: ^Fence,
+	error: Error,
+) {
 	d: ^D3D12_Device = (^D3D12_Device)(device)
 	fence, alloc_err := new(D3D12_Fence)
 	if alloc_err != nil {
@@ -1614,7 +2736,7 @@ create_fence :: proc(instance: ^Instance, device: ^Device) -> (out_fence: ^Fence
 		return
 	}
 
-	hr := d->device->CreateFence(0, {}, d3d12.IFence_UUID, (^rawptr)(&fence.fence))
+	hr := d->device->CreateFence(initial_value, {}, d3d12.IFence_UUID, (^rawptr)(&fence.fence))
 	if !win32.SUCCEEDED(hr) {
 		error = .Unknown
 		return
@@ -1875,7 +2997,7 @@ create_graphics_pipeline :: proc(
 			)
 			element.SemanticName = semantic_name
 			element.SemanticIndex = u32(attr.d3d.semantic_index)
-			element.Format = EN_TO_DXGI_FORMAT[attr.format]
+			element.Format = EN_TO_DXGI_FORMAT_TYPED[attr.format]
 			element.InputSlot = u32(stream.binding_slot)
 			element.AlignedByteOffset = u32(attr.offset)
 			element.InputSlotClass = .PER_VERTEX_DATA if is_per_vertex else .PER_INSTANCE_DATA
@@ -1961,7 +3083,7 @@ create_graphics_pipeline :: proc(
 		EN_STENCIL_OP_TO_D3D12[desc.output_merger.stencil.back.pass]
 	pso_desc.DepthStencilState.BackFace.StencilFunc =
 		EN_COMPARE_FUNC_TO_D3D12[desc.output_merger.stencil.back.compare_func]
-	pso_desc.DSVFormat = EN_TO_DXGI_FORMAT[desc.output_merger.depth_stencil_format]
+	pso_desc.DSVFormat = EN_TO_DXGI_FORMAT_TYPED[desc.output_merger.depth_stencil_format]
 
 	// blend
 	pso_desc.BlendState.AlphaToCoverageEnable = d3d12.BOOL(
@@ -1993,7 +3115,7 @@ create_graphics_pipeline :: proc(
 		format = pso_desc.RTVFormats[:pso_desc.NumRenderTargets],
 	)
 	for &s in zipped {
-		s.format = EN_TO_DXGI_FORMAT[s.color.format]
+		s.format = EN_TO_DXGI_FORMAT_TYPED[s.color.format]
 	}
 
 	hr := d.device->CreateGraphicsPipelineState(
@@ -2028,20 +3150,24 @@ set_pipeline_debug_name :: proc(
 }
 
 D3D12_Pipeline_Layout :: struct {
-	using _:              Pipeline_Layout,
-	root_signature:       ^d3d12.IRootSignature,
-	indirect_indexed_sig: ^d3d12.ICommandSignature,
-	indirect_sig:         ^d3d12.ICommandSignature,
-	ranges:               small_array.Small_Array(
+	using _:                Pipeline_Layout,
+	root_signature:         ^d3d12.IRootSignature,
+	indirect_indexed_sig:   ^d3d12.ICommandSignature,
+	indirect_sig:           ^d3d12.ICommandSignature,
+	ranges:                 small_array.Small_Array(
 		ROOT_SIGNATURE_DWORD_NUM,
 		d3d12.DESCRIPTOR_RANGE1,
 	),
-	root_params:          small_array.Small_Array(ROOT_SIGNATURE_DWORD_NUM, d3d12.ROOT_PARAMETER1),
+	root_params:            small_array.Small_Array(
+		ROOT_SIGNATURE_DWORD_NUM,
+		d3d12.ROOT_PARAMETER1,
+	),
 	// indexes into the above array
-	sets:                 small_array.Small_Array(ROOT_SIGNATURE_DWORD_NUM, int),
+	sets:                   small_array.Small_Array(ROOT_SIGNATURE_DWORD_NUM, int),
 	// also indexes into the above above array
-	base_root_constant:   int,
-	is_graphics:          bool,
+	base_root_constant:     int,
+	enable_draw_parameters: bool,
+	is_graphics:            bool,
 }
 
 EN_TO_D3D12_DESCRIPTOR_RANGE_TYPE := [Descriptor_Type]d3d12.DESCRIPTOR_RANGE_TYPE {
@@ -2262,6 +3388,7 @@ create_pipeline_layout :: proc(
 			desc.enable_d3d12_draw_parameters_emulation,
 		)
 	}
+	layout.enable_draw_parameters = desc.enable_d3d12_draw_parameters_emulation
 
 	out_pipeline_layout = (^Pipeline_Layout)(layout)
 	return
@@ -2627,7 +3754,7 @@ DXGI_TO_EN_FORMAT := #sparse[dxgi.FORMAT]Format {
 	.FORCE_UINT                              = .UNKNOWN, // DXGI_FORMAT_FORCE_UINT = 0xffffffff
 }
 
-EN_TO_DXGI_FORMAT := [Format]dxgi.FORMAT {
+EN_TO_DXGI_FORMAT_TYPED := [Format]dxgi.FORMAT {
 	.UNKNOWN                = .UNKNOWN, // DXGI_FORMAT_UNKNOWN = 0
 	.RGBA32_SFLOAT          = .R32G32B32A32_FLOAT, // DXGI_FORMAT_R32G32B32A32_FLOAT = 2
 	.RGBA32_UINT            = .R32G32B32A32_UINT, // DXGI_FORMAT_R32G32B32A32_UINT = 3
@@ -2702,6 +3829,81 @@ EN_TO_DXGI_FORMAT := [Format]dxgi.FORMAT {
 	.B4_G4_R4_A4_UNORM      = .B4G4R4A4_UNORM, // DXGI_FORMAT_B4G4R4A4_UNORM = 115
 }
 
+EN_TO_DXGI_FORMAT_TYPELESS := [Format]dxgi.FORMAT {
+	.UNKNOWN                = .UNKNOWN, // DXGI_FORMAT_UNKNOWN = 0
+	.RGBA32_SFLOAT          = .R32G32B32A32_TYPELESS, // DXGI_FORMAT_R32G32B32A32_FLOAT = 2
+	.RGBA32_UINT            = .R32G32B32A32_TYPELESS, // DXGI_FORMAT_R32G32B32A32_UINT = 3
+	.RGBA32_SINT            = .R32G32B32A32_TYPELESS, // DXGI_FORMAT_R32G32B32A32_SINT = 4
+	.RGB32_SFLOAT           = .R32G32B32_TYPELESS, // DXGI_FORMAT_R32G32B32_FLOAT = 6
+	.RGB32_UINT             = .R32G32B32_TYPELESS, // DXGI_FORMAT_R32G32B32_UINT = 7
+	.RGB32_SINT             = .R32G32B32_TYPELESS, // DXGI_FORMAT_R32G32B32_SINT = 8
+	.RGBA16_SFLOAT          = .R16G16B16A16_TYPELESS, // DXGI_FORMAT_R16G16B16A16_FLOAT = 10
+	.RGBA16_UNORM           = .R16G16B16A16_TYPELESS, // DXGI_FORMAT_R16G16B16A16_UNORM = 11
+	.RGBA16_UINT            = .R16G16B16A16_TYPELESS, // DXGI_FORMAT_R16G16B16A16_UINT = 12
+	.RGBA16_SNORM           = .R16G16B16A16_TYPELESS, // DXGI_FORMAT_R16G16B16A16_SNORM = 13
+	.RGBA16_SINT            = .R16G16B16A16_TYPELESS, // DXGI_FORMAT_R16G16B16A16_SINT = 14
+	.RG32_SFLOAT            = .R32G32_TYPELESS, // DXGI_FORMAT_R32G32_FLOAT = 16
+	.RG32_UINT              = .R32G32_TYPELESS, // DXGI_FORMAT_R32G32_UINT = 17
+	.RG32_SINT              = .R32G32_TYPELESS, // DXGI_FORMAT_R32G32_SINT = 18
+	.D32_SFLOAT_S8_UINT_X24 = .R32G8X24_TYPELESS, // DXGI_FORMAT_D32_FLOAT_S8X24_UINT = 20
+	.R32_SFLOAT_X8_X24      = .R32_FLOAT_X8X24_TYPELESS, // DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS = 21
+	.X32_G8_UINT_X24        = .R32G8X24_TYPELESS, // DXGI_FORMAT_X32_TYPELESS_G8X24_UINT = 22
+	.R10_G10_B10_A2_UNORM   = .R10G10B10A2_TYPELESS, // DXGI_FORMAT_R10G10B10A2_UNORM = 24
+	.R10_G10_B10_A2_UINT    = .R10G10B10A2_TYPELESS, // DXGI_FORMAT_R10G10B10A2_UINT = 25
+	.R11_G11_B10_UFLOAT     = .R11G11B10_FLOAT, // DXGI_FORMAT_R11G11B10_FLOAT = 26
+	.RGBA8_UNORM            = .R8G8B8A8_TYPELESS, // DXGI_FORMAT_R8G8B8A8_UNORM = 28
+	.RGBA8_SRGB             = .R8G8B8A8_UNORM_SRGB, // DXGI_FORMAT_R8G8B8A8_UNORM_SRGB = 29
+	.RGBA8_UINT             = .R8G8B8A8_TYPELESS, // DXGI_FORMAT_R8G8B8A8_UINT = 30
+	.RGBA8_SNORM            = .R8G8B8A8_TYPELESS, // DXGI_FORMAT_R8G8B8A8_SNORM = 31
+	.RGBA8_SINT             = .R8G8B8A8_TYPELESS, // DXGI_FORMAT_R8G8B8A8_SINT = 32
+	.RG16_SFLOAT            = .R16G16_TYPELESS, // DXGI_FORMAT_R16G16_FLOAT = 34
+	.RG16_UNORM             = .R16G16_TYPELESS, // DXGI_FORMAT_R16G16_UNORM = 35
+	.RG16_UINT              = .R16G16_TYPELESS, // DXGI_FORMAT_R16G16_UINT = 36
+	.RG16_SNORM             = .R16G16_TYPELESS, // DXGI_FORMAT_R16G16_SNORM = 37
+	.RG16_SINT              = .R16G16_TYPELESS, // DXGI_FORMAT_R16G16_SINT = 38
+	.D32_SFLOAT             = .R32_TYPELESS, // DXGI_FORMAT_D32_FLOAT = 40
+	.R32_SFLOAT             = .R32_TYPELESS, // DXGI_FORMAT_R32_FLOAT = 41
+	.R32_UINT               = .R32_TYPELESS, // DXGI_FORMAT_R32_UINT = 42
+	.R32_SINT               = .R32_TYPELESS, // DXGI_FORMAT_R32_SINT = 43
+	.D24_UNORM_S8_UINT      = .R24G8_TYPELESS, // DXGI_FORMAT_D24_UNORM_S8_UINT = 45
+	.R24_UNORM_X8           = .R24_UNORM_X8_TYPELESS, // DXGI_FORMAT_R24_UNORM_X8_TYPELESS = 46
+	.X24_G8_UINT            = .R24G8_TYPELESS, // DXGI_FORMAT_X24_TYPELESS_G8_UINT = 47
+	.RG8_UNORM              = .R8G8_TYPELESS, // DXGI_FORMAT_R8G8_UNORM = 49
+	.RG8_UINT               = .R8G8_TYPELESS, // DXGI_FORMAT_R8G8_UINT = 50
+	.RG8_SNORM              = .R8G8_TYPELESS, // DXGI_FORMAT_R8G8_SNORM = 51
+	.RG8_SINT               = .R8G8_TYPELESS, // DXGI_FORMAT_R8G8_SINT = 52
+	.R16_SFLOAT             = .R16_TYPELESS, // DXGI_FORMAT_R16_FLOAT = 54
+	.D16_UNORM              = .R16_TYPELESS, // DXGI_FORMAT_D16_UNORM = 55
+	.R16_UNORM              = .R16_TYPELESS, // DXGI_FORMAT_R16_UNORM = 56
+	.R16_UINT               = .R16_TYPELESS, // DXGI_FORMAT_R16_UINT = 57
+	.R16_SNORM              = .R16_TYPELESS, // DXGI_FORMAT_R16_SNORM = 58
+	.R16_SINT               = .R16_TYPELESS, // DXGI_FORMAT_R16_SINT = 59
+	.R8_UNORM               = .R8_TYPELESS, // DXGI_FORMAT_R8_UNORM = 61
+	.R8_UINT                = .R8_TYPELESS, // DXGI_FORMAT_R8_UINT = 62
+	.R8_SNORM               = .R8_TYPELESS, // DXGI_FORMAT_R8_SNORM = 63
+	.R8_SINT                = .R8_TYPELESS, // DXGI_FORMAT_R8_SINT = 64
+	.R9_G9_B9_E5_UFLOAT     = .R9G9B9E5_SHAREDEXP, // DXGI_FORMAT_R9G9B9E5_SHAREDEXP = 67
+	.BC1_RGBA_UNORM         = .BC1_TYPELESS, // DXGI_FORMAT_BC1_UNORM = 71
+	.BC1_RGBA_SRGB          = .BC1_UNORM_SRGB, // DXGI_FORMAT_BC1_UNORM_SRGB = 72
+	.BC2_RGBA_UNORM         = .BC2_TYPELESS, // DXGI_FORMAT_BC2_UNORM = 74
+	.BC2_RGBA_SRGB          = .BC2_UNORM_SRGB, // DXGI_FORMAT_BC2_UNORM_SRGB = 75
+	.BC3_RGBA_UNORM         = .BC3_TYPELESS, // DXGI_FORMAT_BC3_UNORM = 77
+	.BC3_RGBA_SRGB          = .BC3_UNORM_SRGB, // DXGI_FORMAT_BC3_UNORM_SRGB = 78
+	.BC4_R_UNORM            = .BC4_TYPELESS, // DXGI_FORMAT_BC4_UNORM = 80
+	.BC4_R_SNORM            = .BC4_TYPELESS, // DXGI_FORMAT_BC4_SNORM = 81
+	.BC5_RG_UNORM           = .BC5_TYPELESS, // DXGI_FORMAT_BC5_UNORM = 83
+	.BC5_RG_SNORM           = .BC5_TYPELESS, // DXGI_FORMAT_BC5_SNORM = 84
+	.B5_G6_R5_UNORM         = .B5G6R5_UNORM, // DXGI_FORMAT_B5G6R5_UNORM = 85
+	.B5_G5_R5_A1_UNORM      = .B5G5R5A1_UNORM, // DXGI_FORMAT_B5G5R5A1_UNORM = 86
+	.BGRA8_UNORM            = .B8G8R8A8_TYPELESS, // DXGI_FORMAT_B8G8R8A8_UNORM = 87
+	.BGRA8_SRGB             = .B8G8R8A8_TYPELESS, // DXGI_FORMAT_B8G8R8A8_UNORM_SRGB = 91
+	.BC6H_RGB_UFLOAT        = .BC6H_UF16, // DXGI_FORMAT_BC6H_UF16 = 95
+	.BC6H_RGB_SFLOAT        = .BC6H_SF16, // DXGI_FORMAT_BC6H_SF16 = 96
+	.BC7_RGBA_UNORM         = .BC7_TYPELESS, // DXGI_FORMAT_BC7_UNORM = 98
+	.BC7_RGBA_SRGB          = .BC7_TYPELESS, // DXGI_FORMAT_BC7_UNORM_SRGB = 99
+	.B4_G4_R4_A4_UNORM      = .B4G4R4A4_UNORM, // DXGI_FORMAT_B4G4R4A4_UNORM = 115
+}
+
 TEXTURE_TYPE_TO_RESOURCE_DIMENSION := #sparse[Texture_Type]d3d12.RESOURCE_DIMENSION {
 	._1D = .TEXTURE1D,
 	._2D = .TEXTURE2D,
@@ -2758,7 +3960,7 @@ create_texture :: proc(
 	)
 	resource_desc.DepthOrArraySize = desc.depth if desc.type == ._3D else desc.layer_num
 	resource_desc.MipLevels = u16(desc.mip_num)
-	resource_desc.Format = EN_TO_DXGI_FORMAT[desc.format]
+	resource_desc.Format = EN_TO_DXGI_FORMAT_TYPELESS[desc.format]
 	resource_desc.SampleDesc.Count = u32(desc.sample_num)
 	resource_desc.Layout = .UNKNOWN
 	resource_desc.Flags = flags
@@ -2861,10 +4063,15 @@ set_texture_debug_name :: proc(
 	return set_debug_name(t.resource, name)
 }
 
+get_texture_desc :: proc(instance: ^Instance, texture: ^Texture) -> Texture_Desc {
+	t: ^D3D12_Texture = (^D3D12_Texture)(texture)
+	return t.desc
+}
+
 get_texture_subresource_index :: proc(
 	desc: Texture_Desc,
 	layer_offset, mip_offset: u32,
-	planes: Plane_Flags,
+	planes: Plane_Flags = Plane_All,
 ) -> u32 {
 	plane_index: u32
 	if planes != Plane_All {

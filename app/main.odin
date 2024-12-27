@@ -6,6 +6,7 @@ import "core:encoding/cbor"
 import "core:fmt"
 import "core:io"
 import "core:log"
+import "core:mem"
 import "core:os"
 
 // import nri "en:nri"
@@ -15,6 +16,28 @@ main :: proc() {
 	logger := log.create_console_logger(ident = "en")
 	defer log.destroy_console_logger(logger)
 	context.logger = logger
+
+	when ODIN_DEBUG {
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, context.allocator)
+		context.allocator = mem.tracking_allocator(&track)
+
+		defer {
+			if len(track.allocation_map) > 0 {
+				fmt.eprintf("=== %v allocations not freed: ===\n", len(track.allocation_map))
+				for _, entry in track.allocation_map {
+					fmt.eprintf("- %v bytes @ %v\n", entry.size, entry.location)
+				}
+			}
+			if len(track.bad_free_array) > 0 {
+				fmt.eprintf("=== %v incorrect frees: ===\n", len(track.bad_free_array))
+				for entry in track.bad_free_array {
+					fmt.eprintf("- %p @ %v\n", entry.memory, entry.location)
+				}
+			}
+			mem.tracking_allocator_destroy(&track)
+		}
+	}
 
 	sdl.Init({.VIDEO})
 	defer sdl.Quit()
@@ -66,48 +89,34 @@ main :: proc() {
 	}
 	log_shader(emit_draws_compiled)
 
-	forward_file, forward_err := os.open("forward.enshader", os.O_RDWR | os.O_CREATE | os.O_TRUNC)
-	if forward_err != nil {
-		log.errorf("Could not open file: {}", forward_err)
+	encode_cbor_to_file :: proc(name: string, data: $T) {
+		if file, err := os.open(name, os.O_RDWR | os.O_CREATE | os.O_TRUNC); err != nil {
+			defer os.close(file)
+			stream := os.stream_from_handle(file)
+			w := io.to_writer(stream)
+			log.errorf("Could not open file: {}", err)
+			marshal_err := cbor.marshal_into_writer(
+				w,
+				data,
+				flags = cbor.ENCODE_FULLY_DETERMINISTIC,
+			)
+			if marshal_err != nil {
+				log.errorf("Could not marshal: {}", marshal_err)
+				return
+			}
+			return
+		}
+	}
+
+	encode_cbor_to_file("forward.enshader", forward_compiled)
+	encode_cbor_to_file("emit_draws.enshader", emit_draws_compiled)
+
+	t, t_ok := texture_from_file(&ren, "assets/Avocado_baseColor.png")
+	if !t_ok {
+		log.errorf("Could not load texture")
 		return
 	}
-	defer os.close(forward_file)
-
-	stream := os.stream_from_handle(forward_file)
-	w := io.to_writer(stream)
-
-	marshal_err := cbor.marshal_into_writer(
-		w,
-		forward_compiled,
-		flags = cbor.ENCODE_FULLY_DETERMINISTIC,
-	)
-	if marshal_err != nil {
-		log.errorf("Could not marshal: {}", marshal_err)
-		return
-	}
-
-	emit_draws_file, emit_draws_err := os.open(
-		"emit_draws.enshader",
-		os.O_RDWR | os.O_CREATE | os.O_TRUNC,
-	)
-	if emit_draws_err != nil {
-		log.errorf("Could not open file: {}", emit_draws_err)
-		return
-	}
-	defer os.close(emit_draws_file)
-
-	stream = os.stream_from_handle(emit_draws_file)
-	w = io.to_writer(stream)
-
-	marshal_err = cbor.marshal_into_writer(
-		w,
-		emit_draws_compiled,
-		flags = cbor.ENCODE_FULLY_DETERMINISTIC,
-	)
-	if marshal_err != nil {
-		log.errorf("Could not marshal: {}", marshal_err)
-		return
-	}
+	defer destroy_texture(&t, &ren)
 
 	running := true
 	is_fullscreen := false

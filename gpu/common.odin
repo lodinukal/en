@@ -128,6 +128,210 @@ Instance :: struct {
 	) -> mem.Allocator_Error,
 	reset_command_allocator:          proc(instance: ^Instance, allocator: ^Command_Allocator),
 
+	// command buffer
+	create_command_buffer:            proc(
+		instance: ^Instance,
+		allocator: ^Command_Allocator,
+	) -> (
+		buffer: ^Command_Buffer,
+		error: Error,
+	),
+	destroy_command_buffer:           proc(instance: ^Instance, buffer: ^Command_Buffer),
+	set_command_buffer_debug_name:    proc(
+		instance: ^Instance,
+		buffer: ^Command_Buffer,
+		name: string,
+	) -> mem.Allocator_Error,
+	begin_command_buffer:             proc(
+		instance: ^Instance,
+		buffer: ^Command_Buffer,
+	) -> (
+		error: Error
+	),
+	end_command_buffer:               proc(
+		instance: ^Instance,
+		buffer: ^Command_Buffer,
+	) -> (
+		error: Error
+	),
+	cmd_set_viewports:                proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		viewports: []Viewport,
+	),
+	cmd_set_scissors:                 proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		scissors: []Rect,
+	),
+	cmd_set_depth_bounds:             proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		min, max: f32,
+	),
+	cmd_set_stencil_reference:        proc(instance: ^Instance, cmd: ^Command_Buffer, ref: u8),
+	cmd_set_sample_locations:         proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		locations: []Sample_Location,
+		sample_num: sample,
+	),
+	cmd_set_blend_constants:          proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		constants: [4]f32,
+	),
+	cmd_clear_attachments:            proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		clears: []Clear_Desc,
+		rects: []Rect,
+	),
+	cmd_clear_storage_buffer:         proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		#by_ptr desc: Clear_Storage_Buffer_Desc,
+	),
+	cmd_clear_storage_texture:        proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		#by_ptr desc: Clear_Storage_Texture_Desc,
+	),
+	cmd_begin_rendering:              proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		#by_ptr desc: Attachments_Desc,
+	),
+	cmd_end_rendering:                proc(instance: ^Instance, cmd: ^Command_Buffer),
+	cmd_set_vertex_buffers:           proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		base_slot: u32,
+		buffers: []^Buffer,
+		offsets: []u64,
+	),
+	cmd_set_index_buffer:             proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		buffer: ^Buffer,
+		offset: u64,
+		format: Index_Type,
+	),
+	cmd_set_pipeline_layout:          proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		layout: ^Pipeline_Layout,
+	),
+	cmd_set_pipeline:                 proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		pipeline: ^Pipeline,
+	),
+	cmd_set_descriptor_pool:          proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		pool: ^Descriptor_Pool,
+	),
+	cmd_set_descriptor_set:           proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		set_index: u32,
+		set: ^Descriptor_Set,
+	),
+	cmd_set_constants:                proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		index: u32,
+		data: []u32,
+	),
+	cmd_draw:                         proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		#by_ptr desc: Draw_Desc,
+	),
+	cmd_draw_indexed:                 proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		#by_ptr desc: Draw_Indexed_Desc,
+	),
+	cmd_draw_indirect:                proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		buffer: ^Buffer,
+		offset: u64,
+		draw_num: u32,
+		stride: u32,
+		count_buffer: ^Buffer = nil,
+		count_buffer_offset: u64 = 0,
+	),
+	cmd_draw_indexed_indirect:        proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		buffer: ^Buffer,
+		offset: u64,
+		draw_num: u32,
+		stride: u32,
+		count_buffer: ^Buffer = nil,
+		count_buffer_offset: u64 = 0,
+	),
+	cmd_copy_buffer:                  proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		dst: ^Buffer,
+		dst_offset: u64,
+		src: ^Buffer,
+		src_offset: u64,
+		size: u64,
+	),
+	cmd_copy_texture:                 proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		dst: ^Texture,
+		dst_region: ^Texture_Region_Desc,
+		src: ^Texture,
+		src_region: ^Texture_Region_Desc,
+	),
+	cmd_resolve_texture:              proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		dst: ^Texture,
+		dst_region: ^Texture_Region_Desc,
+		src: ^Texture,
+		src_region: ^Texture_Region_Desc,
+	),
+	cmd_upload_buffer_to_texture:     proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		dst: ^Texture,
+		dst_region: Texture_Region_Desc,
+		src: ^Buffer,
+		src_data_layout: Texture_Data_Layout_Desc,
+	),
+	cmd_readback_texture_to_buffer:   proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		dst_buffer: ^Buffer,
+		dst_data_layout: Texture_Data_Layout_Desc,
+		src_texture: ^Texture,
+		src_region: Texture_Region_Desc,
+	),
+	cmd_dispatch:                     proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		groups: [3]u32,
+	),
+	cmd_dispatch_indirect:            proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		buffer: ^Buffer,
+		offset: u64,
+	),
+	cmd_barrier:                      proc(
+		instance: ^Instance,
+		cmd: ^Command_Buffer,
+		#by_ptr desc: Barrier_Group_Desc,
+	),
+
 	// command queue
 	create_command_queue:             proc(
 		instance: ^Instance,
@@ -226,10 +430,19 @@ Instance :: struct {
 	),
 	reset_descriptor_pool:            proc(instance: ^Instance, pool: ^Descriptor_Pool),
 
+	// descriptor set
+	update_descriptor_ranges:         proc(
+		instance: ^Instance,
+		set: ^Descriptor_Set,
+		base_range: u32,
+		ranges: []Descriptor_Range_Update_Desc,
+	),
+
 	// fence
 	create_fence:                     proc(
 		instance: ^Instance,
 		device: ^Device,
+		initial_value: u64 = 0,
 	) -> (
 		fence: ^Fence,
 		error: Error,
@@ -335,6 +548,7 @@ Instance :: struct {
 		texture: ^Texture,
 		name: string,
 	) -> mem.Allocator_Error,
+	get_texture_desc:                 proc(instance: ^Instance, texture: ^Texture) -> Texture_Desc,
 }
 
 Fence :: struct {}
@@ -526,7 +740,7 @@ Ray_Tracing_Stages: Stage_Flags : {
 }
 
 Viewport :: struct {
-	f, y, width, height, min_depth, max_depth: f32,
+	x, y, width, height, min_depth, max_depth: f32,
 	origin_bottom_left:                        bool,
 }
 
@@ -535,19 +749,11 @@ Rect :: struct {
 	width, height: dim,
 }
 
-Colorf :: struct {
-	r, g, b, a: f32,
-}
+Colorf :: [4]f32
+Colorui :: [4]u32
+Colori :: [4]i32
 
-Colorui :: struct {
-	r, g, b, a: u32,
-}
-
-Colori :: struct {
-	r, g, b, a: i32,
-}
-
-Color :: union {
+Color :: union #no_nil {
 	Colorf,
 	Colorui,
 	Colori,
@@ -842,14 +1048,14 @@ Descriptor_Set_Desc :: struct {
 	ranges:         []Descriptor_Range_Desc,
 }
 
-Root_Constant_Desc :: struct {
+Constant_Desc :: struct {
 	register_index, size: u32,
 	shader_stages:        Stage_Flags,
 }
 
 Pipeline_Layout_Desc :: struct {
 	constants_register_space:               u32,
-	constants:                              []Root_Constant_Desc,
+	constants:                              []Constant_Desc,
 	descriptor_sets:                        []Descriptor_Set_Desc,
 	shader_stages:                          Stage_Flags,
 	ignore_global_spirv_offsets:            bool,
@@ -1273,8 +1479,8 @@ Access_Bits :: enum u16 {
 	Shader_Resource_Storage, // GRAPHICS_SHADERS, COMPUTE_SHADER, RAY_TRACING_SHADERS, CLEAR_STORAGE
 	Argument_Buffer, // INDIRECT
 	Color_Attachment, // COLOR_ATTACHMENT
-	Depth_Stencil_Attachment_write, // DEPTH_STENCIL_ATTACHMENT
-	Depth_Dtencil_Attachment_Read, // DEPTH_STENCIL_ATTACHMENT
+	Depth_Stencil_Attachment_Write, // DEPTH_STENCIL_ATTACHMENT
+	Depth_Stencil_Attachment_Read, // DEPTH_STENCIL_ATTACHMENT
 	Copy_Source, // COPY
 	Copy_Destination, // COPY
 	Resolve_Source, // RESOLVE
@@ -1305,11 +1511,43 @@ Access_Stage :: struct {
 	stages: Stage_Flags,
 }
 
+ACCESS_STAGE_SHADER_RESOURCE: Access_Stage : {access = {.Shader_Resource}}
+ACCESS_STAGE_SHADER_RESOURCE_STORAGE: Access_Stage : {access = {.Shader_Resource_Storage}}
+ACCESS_STAGE_COPY_SOURCE: Access_Stage : {access = {.Copy_Source}, stages = {.Copy}}
+ACCESS_STAGE_COPY_DESTINATION: Access_Stage : {access = {.Copy_Destination}, stages = {.Copy}}
+ACCESS_STAGE_VERTEX_BUFFER: Access_Stage : {access = {.Vertex_Buffer}, stages = {.Vertex_Shader}}
+ACCESS_STAGE_INDEX_BUFFER: Access_Stage : {
+	access = {.Index_Buffer},
+	stages = {.Vertex_Shader, .Index_Input},
+}
+
 Access_Layout_Stage :: struct {
 	access: Access_Flags,
 	layout: Layout,
 	stages: Stage_Flags,
 }
+
+ACCESS_LAYOUT_STAGE_COLOR_ATTACHMENT: Access_Layout_Stage : {
+	access = {.Color_Attachment},
+	layout = .Color_Attachment,
+}
+
+ACCESS_LAYOUT_STAGE_DEPTH_STENCIL_ATTACHMENT_WRITE: Access_Layout_Stage : {
+	access = {.Depth_Stencil_Attachment_Write},
+	layout = .Depth_Stencil_Attachment,
+}
+
+ACCESS_LAYOUT_STAGE_DEPTH_STENCIL_ATTACHMENT_READ: Access_Layout_Stage : {
+	access = {.Depth_Stencil_Attachment_Read},
+	layout = .Depth_Stencil_Readonly,
+}
+
+ACCESS_LAYOUT_STAGE_SHADER_RESOURCE: Access_Layout_Stage : {
+	access = {.Shader_Resource},
+	layout = .Shader_Resource,
+}
+
+ACCESS_LAYOUT_STAGE_PRESENT: Access_Layout_Stage : {layout = .Present}
 
 Global_Barrier_Desc :: struct {
 	before, after: Access_Stage,
@@ -1499,8 +1737,7 @@ Device_Desc :: struct {
 	scratch_buffer_offset_alignment:                                                       u32,
 	shader_binding_table_alignment:                                                        u32,
 	pipeline_layout_descriptor_set_max_num:                                                u32,
-	pipeline_layout_root_constant_max_size:                                                u32,
-	pipeline_layout_root_descriptor_max_num:                                               u32,
+	pipeline_layout_constant_max_size:                                                     u32,
 	descriptor_set_sampler_max_num:                                                        u32,
 	descriptor_set_constant_buffer_max_num:                                                u32,
 	descriptor_set_storage_buffer_max_num:                                                 u32,
@@ -1751,4 +1988,29 @@ get_vendor_from_id :: proc(id: u32) -> Vendor {
 	case:
 		return Vendor.UNKNOWN
 	}
+}
+
+get_dimension_mip_adjusted :: proc(
+	#by_ptr desc: Texture_Desc,
+	dimension_index: u8,
+	mip: mip,
+) -> dim {
+	dimension: dim = 0
+	switch dimension_index {
+	case 0:
+		dimension = desc.width
+	case 1:
+		dimension = desc.height
+	case 2:
+		dimension = desc.depth
+	}
+
+	dimension = max(1, dimension >> mip)
+
+	if dimension_index < 2 {
+		block_width := FORMAT_PROPS[desc.format].block_width
+		dimension = dim(mem.align_forward_int(int(dimension), int(block_width)))
+	}
+
+	return dimension
 }
