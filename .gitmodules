@@ -3,4 +3,4 @@
 	url = https://github.com/lodinukal/d3d12ma
 [submodule "external/slang"]
 	path = external/slang
-	url = https://github.com/DragosPopse/odin-slang
+	url = https://github.com/lodinukal/odin-slang.git

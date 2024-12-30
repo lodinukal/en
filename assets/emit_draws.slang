@@ -1,14 +1,17 @@
-#include "common.slang"
+#include "common.slangh"
 
-DECLAREC(Constants, 0)
+[vk::push_constant]
+cbuffer C
 {
     uint instance_count;
 }
 
-DECLARET(StructuredBuffer<MeshInfo>, meshes, 0, 1);
-DECLARET(StructuredBuffer<Instance>, instances, 0, 2);
-DECLARET(RWBuffer<uint>, cmd_buffer, 0, 3);
-DECLARET(RWBuffer<uint>, readback, 1, 3);
+StructuredBuffer<MeshInfo> meshes : register(t0, space1);
+
+StructuredBuffer<Instance> instances : register(t0, space2);
+
+RWStructuredBuffer<uint> cmd_buffer : register(t0, space3);
+RWBuffer<uint> readback : register(t1, space3);
 
 groupshared uint shared_draw_count;
 
@@ -31,13 +34,7 @@ void cs_main(uint thread_id: SV_DispatchThreadId)
 
     uint mesh_index = instances[thread_id].mesh_id;
     const MeshInfo mesh = meshes[mesh_index];
-    let cmd = IndexedIndirectCommand.build(
-        mesh.index_count,
-        1,
-        mesh.base_index,
-        mesh.vertex_offset,
-        thread_id);
-    SET_INDEXED_INDIRECT_ARR(cmd_buffer, draw_index, cmd);
+    set_indexed_indirect_arr(cmd_buffer, draw_index, mesh.index_count, 1, mesh.base_index, mesh.vertex_offset, thread_id);
 
     GroupMemoryBarrierWithGroupSync();
 

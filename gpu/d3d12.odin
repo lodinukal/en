@@ -1,21 +1,18 @@
 #+build windows
 #+private file
-package en_gpu
+package mercury
 
 import "base:runtime"
 import "core:container/small_array"
 import "core:log"
 import "core:mem"
 import "core:strings"
-import "core:sync"
 
 import win32 "core:sys/windows"
 import "vendor:directx/d3d12"
 import "vendor:directx/dxgi"
 
 import d3d12ma "external:d3d12ma"
-
-import fmt "core:fmt"
 
 set_debug_name :: proc(obj: ^d3d12.IObject, name: string) -> (error: mem.Allocator_Error) {
 	name_wide := win32.MultiByteToWideChar(win32.CP_UTF8, 0, raw_data(name), -1, nil, 0)
@@ -329,13 +326,6 @@ D3D12_Staging_Heap :: struct {
 	descriptor_size: u32,
 }
 
-STAGING_HEAP_DESCRIPTOR_COUNTS := [d3d12.DESCRIPTOR_HEAP_TYPE]u32 {
-	.CBV_SRV_UAV = 1024,
-	.SAMPLER     = 1024,
-	.RTV         = 256,
-	.DSV         = 128,
-}
-
 // once created, cannot be destroyed until the device is destroyed
 create_staging_heap :: proc(
 	device: ^Device,
@@ -348,7 +338,7 @@ create_staging_heap :: proc(
 	heap_index = len(d.heaps)
 	desc: d3d12.DESCRIPTOR_HEAP_DESC
 	desc.Type = type
-	desc.NumDescriptors = STAGING_HEAP_DESCRIPTOR_COUNTS[type]
+	desc.NumDescriptors = d.staging_heap_counts[type]
 	desc.Flags = {}
 
 	heap: ^d3d12.IDescriptorHeap
@@ -450,6 +440,7 @@ D3D12_Device :: struct {
 	allocator:             ^d3d12ma.Allocator,
 	adapter:               ^dxgi.IAdapter1,
 	queues:                [Command_Queue_Type]^Command_Queue,
+	staging_heap_counts:   [d3d12.DESCRIPTOR_HEAP_TYPE]u32,
 	heaps:                 [dynamic]D3D12_Staging_Heap,
 	free_descriptors:      [d3d12.DESCRIPTOR_HEAP_TYPE][dynamic]D3D12_CPU_Descriptor_Handle,
 	//
@@ -470,6 +461,24 @@ create_device :: proc(
 		error = .Out_Of_Memory
 		return
 	}
+
+	requirements := desc.requirements
+	resource_count: u32 = 0
+	resource_count += requirements.sampler_max_num
+	resource_count += requirements.texture_max_num
+	resource_count += requirements.buffer_max_num
+	resource_count += requirements.render_target_max_num
+	resource_count += requirements.depth_stencil_target_max_num
+	// means none is specified
+	if resource_count == 0 {
+		requirements = DEFAULT_RESOURCE_REQUIREMENTS
+	}
+
+	device.staging_heap_counts[.SAMPLER] = requirements.sampler_max_num
+	device.staging_heap_counts[.CBV_SRV_UAV] =
+		requirements.texture_max_num + requirements.buffer_max_num
+	device.staging_heap_counts[.RTV] = requirements.render_target_max_num
+	device.staging_heap_counts[.DSV] = requirements.depth_stencil_target_max_num
 
 	hr := d3d12_instance.factory->EnumAdapters1(0, &device.adapter)
 	if !win32.SUCCEEDED(hr) {

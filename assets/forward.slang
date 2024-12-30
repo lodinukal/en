@@ -1,5 +1,5 @@
 #define DRAW_INDIRECT
-#include "common.slang"
+#include "common.slangh"
 
 struct VertexStageOutput
 {
@@ -11,16 +11,26 @@ struct VertexStageOutput
     float4 sv_position : SV_POSITION;
 };
 
-DECLAREC(Constants, 0)
+struct Vertex
+{
+    float3 position : POSITION;
+    float3 normal : NORMAL;
+    float2 texcoord : TEXCOORD0;
+};
+
+[vk::push_constant]
+cbuffer C
 {
     column_major float4x4 view;
     column_major float4x4 projection;
 }
 
-DECLARET(StructuredBuffer<Material>, materials, 0, 1);
-DECLARES(SamplerState, sampler, 0, 2);
-DECLARET(Texture2D, textures[], 1, 2);
-DECLARET(StructuredBuffer<Instance>, instances, 0, 3);
+StructuredBuffer<Material> materials : register(t0, space1);
+
+SamplerState sampler : register(s0, space2);
+Texture2D textures[] : register(t1, space2);
+
+StructuredBuffer<Instance> instances : register(t0, space3);
 
 [shader("vertex")]
 VertexStageOutput vs_main(Vertex input, DECLARE_DRAW_PARAMETERS)
@@ -50,13 +60,4 @@ float4 fs_main(VertexStageOutput input)
     Material material = materials[input.material_id];
 
     return textures[material.albedo].Sample(sampler, input.texcoord);
-    // input.material_id == 1
-    // materials[1].albedo == 2
-    // so I expect material.albedo == 2
-    // and renderdoc shows albedo == 2 but shader shows albedo = 1
-    // if (material.albedo == 1)
-    // {
-    //     return float4(1.0, 0.0, 0.0, 1.0);
-    // }
-    // return float4(0, material.albedo / 2.0, materials[1].albedo / 2.0, 1.0);
 };

@@ -28,7 +28,7 @@ Material :: struct {
 	emissive:           Image_Handle,
 }
 
-MAX_IMAGES :: 1 << 12
+MAX_IMAGES :: 1 << 13
 Image_Handle :: distinct u32
 WHITE_IMAGE_HANDLE :: 0
 BLACK_IMAGE_HANDLE :: 1
@@ -178,9 +178,20 @@ image_pool_descriptor_requirements: gpu.Descriptor_Pool_Desc : {
 	texture_max_num = MAX_IMAGES,
 }
 
+image_pool_resource_requirements: gpu.Resource_Requirements : {
+	sampler_max_num = 1,
+	texture_max_num = MAX_IMAGES,
+}
+
 render_components_descriptor_requirements :: proc() -> gpu.Descriptor_Pool_Desc {
 	accumulating: gpu.Descriptor_Pool_Desc
 	accumulating = combine_pool_descs(accumulating, image_pool_descriptor_requirements)
+	return accumulating
+}
+
+render_components_resource_requirements :: proc() -> gpu.Resource_Requirements {
+	accumulating: gpu.Resource_Requirements
+	accumulating = combine_resource_reqs(accumulating, image_pool_resource_requirements)
 	return accumulating
 }
 
@@ -198,5 +209,16 @@ combine_pool_descs :: proc(a, b: gpu.Descriptor_Pool_Desc) -> gpu.Descriptor_Poo
 		b.storage_structured_buffer_max_num,
 		acceleration_structure_max_num = a.acceleration_structure_max_num +
 		b.acceleration_structure_max_num,
+	}
+}
+
+combine_resource_reqs :: proc(a, b: gpu.Resource_Requirements) -> gpu.Resource_Requirements {
+	return {
+		sampler_max_num = a.sampler_max_num + b.sampler_max_num,
+		texture_max_num = a.texture_max_num + b.texture_max_num,
+		buffer_max_num = a.buffer_max_num + b.buffer_max_num,
+		render_target_max_num = a.render_target_max_num + b.render_target_max_num,
+		depth_stencil_target_max_num = a.depth_stencil_target_max_num +
+		b.depth_stencil_target_max_num,
 	}
 }

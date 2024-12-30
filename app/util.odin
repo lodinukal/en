@@ -1,6 +1,5 @@
 package app
 
-import "core:c"
 import "core:log"
 import "core:strings"
 import "en:gpu"

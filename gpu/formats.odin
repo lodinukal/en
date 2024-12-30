@@ -1,4 +1,4 @@
-package en_gpu
+package mercury
 
 import "core:reflect"
 

@@ -1,13 +1,10 @@
-package en_gpu
+package mercury
 
-import "base:builtin"
-import "base:intrinsics"
 import "base:runtime"
 import "core:log"
 import "core:mem"
 import "core:reflect"
 
-import "core:encoding/cbor"
 
 Error :: enum {
 	Success,
@@ -20,6 +17,8 @@ MAX_RANGES_PER_DESCRIPTOR_SET :: 8
 MAX_VERTEX_STREAMS :: 8
 MAX_VERTEX_ATTRIBUTES :: 16
 
+USE_D3D12 :: #config(USE_D3D12, ODIN_OS == .Windows)
+
 create_instance :: proc(
 	api: Graphics_API,
 	enable_graphics_api_validation: bool = true,
@@ -29,8 +28,16 @@ create_instance :: proc(
 ) {
 	switch api {
 	case .D3D12:
-		instance, error = create_d3d12_instance(enable_graphics_api_validation)
-		error = validate_instance(instance)
+		when USE_D3D12 {
+			instance, error = create_d3d12_instance(enable_graphics_api_validation)
+			error = validate_instance(instance)
+		} else when #exists(create_d3d12_instance) {
+			log.errorf("D3D12 is not enabled")
+			error = .Invalid_Parameter
+		} else {
+			log.errorf("D3D12 is not supported on {}", ODIN_OS)
+			error = .Invalid_Parameter
+		}
 		return
 	case .Vulkan:
 		log.errorf("Vulkan is not supported yet")
@@ -44,7 +51,7 @@ validate_instance :: proc(instance: ^Instance) -> Error {
 	ti := runtime.type_info_base(type_info_of(Instance))
 	fields := reflect.struct_fields_zipped(ti.id)
 	for field in fields {
-		as_proc, ok := field.type.variant.(runtime.Type_Info_Procedure)
+		_, ok := field.type.variant.(runtime.Type_Info_Procedure)
 		if ok {
 			ptr := ((^u64)(uintptr(instance) + field.offset))^
 			if ptr == 0 {
@@ -830,6 +837,21 @@ Buffer_View_Type :: enum u8 {
 	Shader_Resource,
 	Shader_Resource_Storage,
 	Constant,
+}
+
+Resource_Requirements :: struct {
+	sampler_max_num:              u32,
+	texture_max_num:              u32,
+	buffer_max_num:               u32,
+	render_target_max_num:        u32,
+	depth_stencil_target_max_num: u32,
+}
+DEFAULT_RESOURCE_REQUIREMENTS :: Resource_Requirements {
+	sampler_max_num              = 1024,
+	texture_max_num              = 1024,
+	buffer_max_num               = 1024,
+	render_target_max_num        = 8,
+	depth_stencil_target_max_num = 8,
 }
 
 Descriptor_Type :: enum u8 {
@@ -1871,20 +1893,11 @@ VK_Extensions :: struct {
 }
 
 Device_Creation_Desc :: struct {
-	adapter_desc:                           ^Adapter_Desc,
-	callback_interface:                     ^Callback_Interface,
-	allocation_callbacks:                   ^Allocation_Callbacks,
-	spirv_binding_offsets:                  SPIRV_Binding_Offsets,
-	vk_extensions:                          VK_Extensions,
-	graphics_api:                           Graphics_API,
-	shader_ext_register:                    u32,
-	shader_ext_space:                       u32,
-	enable_validation:                      bool,
-	enable_graphics_api_validation:         bool,
-	enable_d3d12_draw_parameters_emulation: bool,
-	enable_d3d11_command_buffer_emulation:  bool,
-	disable_vk_ray_tracing:                 bool,
-	disable3rd_party_allocation_callbacks:  bool,
+	adapter_desc:                   ^Adapter_Desc,
+	graphics_api:                   Graphics_API,
+	requirements:                   Resource_Requirements,
+	enable_validation:              bool,
+	enable_graphics_api_validation: bool,
 }
 
 Swapchain_Format :: enum u8 {

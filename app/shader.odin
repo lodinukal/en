@@ -73,7 +73,11 @@ sp_createGlobalSession: proc "c" (
 @(private = "file")
 sp_shutdown: proc "c" ()
 
-create_global_session :: proc() -> (session: ^sp.IGlobalSession, ok: bool = true) {
+Shader_Context :: struct {
+	global_session: ^sp.IGlobalSession,
+}
+
+create_shader_context :: proc(ctx: ^Shader_Context) -> (ok: bool = true) {
 	// attempt to load
 	if loaded == nil {
 		loaded = dynlib.load_library("slang.dll") or_return
@@ -81,13 +85,13 @@ create_global_session :: proc() -> (session: ^sp.IGlobalSession, ok: bool = true
 		auto_cast dynlib.symbol_address(loaded, "slang_createGlobalSession") or_return
 		sp_shutdown = auto_cast dynlib.symbol_address(loaded, "slang_shutdown") or_return
 	}
-	slang_check(sp_createGlobalSession(sp.API_VERSION, &session))
+	slang_check(sp_createGlobalSession(sp.API_VERSION, &ctx.global_session))
 	return
 }
 
-destroy_global_session :: proc(global_session: ^sp.IGlobalSession) {
-	if global_session == nil do return
-	global_session->release()
+destroy_shader_context :: proc(ctx: ^Shader_Context) {
+	if ctx == nil do return
+	ctx.global_session->release()
 	if loaded != nil {
 		sp_shutdown()
 		dynlib.unload_library(loaded)
@@ -104,10 +108,59 @@ Shader_Stage :: enum {
 Target :: enum u8 {
 	DXIL  = 0,
 	SPIRV = 1,
+	METAL = 2,
+}
+
+@(private)
+spawn_session :: proc(ctx: ^Shader_Context) -> ^sp.ISession {
+	target_dxil_desc := sp.TargetDesc {
+		structureSize = size_of(sp.TargetDesc),
+		format        = .DXIL,
+		flags         = {},
+		profile       = ctx.global_session->findProfile("sm_6_0"),
+	}
+
+	target_spirv_desc := sp.TargetDesc {
+		structureSize = size_of(sp.TargetDesc),
+		format        = .SPIRV,
+		flags         = {.GENERATE_SPIRV_DIRECTLY},
+		profile       = ctx.global_session->findProfile("sm_6_0"),
+	}
+
+	target_msl_desc := sp.TargetDesc {
+		structureSize = size_of(sp.TargetDesc),
+		format        = .METAL,
+		flags         = {},
+		profile       = ctx.global_session->findProfile("sm_6_0"),
+	}
+
+	targets := [?]sp.TargetDesc{target_dxil_desc, target_spirv_desc, target_msl_desc}
+
+	compiler_option_entries := [?]sp.CompilerOptionEntry {
+		{name = .VulkanUseEntryPointName, value = {intValue0 = 1}},
+		{name = .VulkanBindShiftAll, value = {intValue0 = 0, intValue1 = 0}},
+		{name = .VulkanBindShiftAll, value = {intValue0 = 1, intValue1 = 0}},
+		{name = .VulkanBindShiftAll, value = {intValue0 = 2, intValue1 = 0}},
+		{name = .VulkanBindShiftAll, value = {intValue0 = 3, intValue1 = 0}},
+		{
+			name = .DisableWarning,
+			value = {kind = .String, stringValue0 = "profileImplicitlyUpgraded"},
+		},
+	}
+	session_desc := sp.SessionDesc {
+		structureSize            = size_of(sp.SessionDesc),
+		targets                  = raw_data(targets[:]),
+		targetCount              = len(targets),
+		compilerOptionEntries    = &compiler_option_entries[0],
+		compilerOptionEntryCount = len(compiler_option_entries),
+	}
+	session: ^sp.ISession
+	slang_check(ctx.global_session->createSession(session_desc, &session))
+	return session
 }
 
 compile_shader :: proc(
-	global_session: ^sp.IGlobalSession,
+	ctx: ^Shader_Context,
 	path: cstring,
 	stages: gpu.Stage_Flags,
 	allocator := context.allocator,
@@ -115,43 +168,15 @@ compile_shader :: proc(
 	result: [Shader_Stage][Target][]u8,
 	ok: bool = true,
 ) {
-	if global_session == nil {
-		log.errorf("No global session")
+	if ctx == nil {
+		log.errorf("No context")
 		ok = false
 		return
 	}
 	using sp
 	code, diagnostics: ^IBlob
 	r: Result
-
-	target_dxil_desc := TargetDesc {
-		structureSize = size_of(TargetDesc),
-		format        = .DXIL,
-		flags         = {},
-		profile       = global_session->findProfile("sm_6_0"),
-	}
-
-	target_spirv_desc := TargetDesc {
-		structureSize = size_of(TargetDesc),
-		format        = .SPIRV,
-		flags         = {.GENERATE_SPIRV_DIRECTLY},
-		profile       = global_session->findProfile("sm_6_0"),
-	}
-
-	targets := [?]TargetDesc{target_dxil_desc, target_spirv_desc}
-
-	compiler_option_entries := [?]CompilerOptionEntry {
-		{name = .VulkanUseEntryPointName, value = {intValue0 = 1}},
-	}
-	session_desc := SessionDesc {
-		structureSize            = size_of(SessionDesc),
-		targets                  = raw_data(targets[:]),
-		targetCount              = len(targets),
-		compilerOptionEntries    = &compiler_option_entries[0],
-		compilerOptionEntryCount = len(compiler_option_entries),
-	}
-	session: ^ISession
-	slang_check(global_session->createSession(session_desc, &session))
+	session := spawn_session(ctx)
 	defer session->release()
 
 	module: ^IModule = session->loadModule(path, &diagnostics)

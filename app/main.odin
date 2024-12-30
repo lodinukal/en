@@ -1,13 +1,14 @@
 package app
 
-import "core:bufio"
-import "core:c"
 import "core:encoding/cbor"
-import "core:fmt"
+
+@(require) import "core:fmt"
+
 import "core:io"
 import "core:log"
-import "core:mem"
+@(require) import "core:mem"
 import "core:os"
+import "core:time"
 
 // import nri "en:nri"
 import sdl "vendor:sdl2"
@@ -58,15 +59,27 @@ main :: proc() {
 	if !init_renderer(&ren) do return
 	defer destroy_renderer(&ren)
 
-	session, slang_ok := create_global_session()
+	sw: time.Stopwatch
+	time.stopwatch_start(&sw)
+	session: Shader_Context
+	slang_ok := create_shader_context(&session)
 	if !slang_ok {
 		log.errorf("Could not create global session")
 		return
 	}
-	defer destroy_global_session(session)
+	defer destroy_shader_context(&session)
 
+	time.stopwatch_stop(&sw)
+
+	log.infof(
+		"Session created in {} ms",
+		(time.duration_milliseconds(time.stopwatch_duration(sw))),
+	)
+
+	time.stopwatch_reset(&sw)
+	time.stopwatch_start(&sw)
 	forward_compiled, ok_forward := compile_shader(
-		session,
+		&session,
 		"assets/forward.slang",
 		{.Vertex_Shader, .Fragment_Shader},
 		allocator = context.temp_allocator,
@@ -76,9 +89,17 @@ main :: proc() {
 		return
 	}
 	log_shader(forward_compiled)
+	time.stopwatch_stop(&sw)
 
+	log.infof(
+		"Forward shader compiled in {} ms",
+		(time.duration_milliseconds(time.stopwatch_duration(sw))),
+	)
+
+	time.stopwatch_reset(&sw)
+	time.stopwatch_start(&sw)
 	emit_draws_compiled, ok_emit_draws := compile_shader(
-		session,
+		&session,
 		"assets/emit_draws.slang",
 		{.Compute_Shader},
 		allocator = context.temp_allocator,
@@ -88,22 +109,44 @@ main :: proc() {
 		return
 	}
 	log_shader(emit_draws_compiled)
+	time.stopwatch_stop(&sw)
+
+	log.infof(
+		"Emit draws shader compiled in {} ms",
+		(time.duration_milliseconds(time.stopwatch_duration(sw))),
+	)
+
+	time.stopwatch_reset(&sw)
+	time.stopwatch_start(&sw)
+	emit_draws_compiled, ok_emit_draws = compile_shader(
+		&session,
+		"assets/emit_draws.slang",
+		{.Compute_Shader},
+		allocator = context.temp_allocator,
+	)
+	if !ok_emit_draws {
+		log.errorf("Could not compile shader")
+		return
+	}
+	time.stopwatch_stop(&sw)
+
+	log.infof(
+		"Emit draws shader again compiled in {} ms",
+		(time.duration_milliseconds(time.stopwatch_duration(sw))),
+	)
 
 	encode_cbor_to_file :: proc(name: string, data: $T) {
-		if file, err := os.open(name, os.O_RDWR | os.O_CREATE | os.O_TRUNC); err != nil {
-			defer os.close(file)
-			stream := os.stream_from_handle(file)
-			w := io.to_writer(stream)
+		file, err := os.open(name, os.O_RDWR | os.O_CREATE | os.O_TRUNC)
+		if err != nil {
 			log.errorf("Could not open file: {}", err)
-			marshal_err := cbor.marshal_into_writer(
-				w,
-				data,
-				flags = cbor.ENCODE_FULLY_DETERMINISTIC,
-			)
-			if marshal_err != nil {
-				log.errorf("Could not marshal: {}", marshal_err)
-				return
-			}
+			return
+		}
+		defer os.close(file)
+		stream := os.stream_from_handle(file)
+		w := io.to_writer(stream)
+		marshal_err := cbor.marshal_into_writer(w, data, flags = cbor.ENCODE_FULLY_DETERMINISTIC)
+		if marshal_err != nil {
+			log.errorf("Could not marshal: {}", marshal_err)
 			return
 		}
 	}
@@ -149,8 +192,8 @@ main :: proc() {
 }
 
 log_shader :: proc(shaders: [Shader_Stage][Target][]u8) {
-	for target_set, stage in shaders {
-		for code, target in target_set {
+	for code_set, stage in shaders {
+		for code, target in code_set {
 			if len(code) == 0 do continue
 			log.infof("Shader stage: {} {} {}", target, stage, len(code))
 		}

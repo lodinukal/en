@@ -4,7 +4,6 @@ import "core:c"
 import "core:fmt"
 import "core:log"
 import "core:mem"
-import "core:os"
 
 import gpu "en:gpu"
 import sdl "vendor:sdl2"
@@ -49,8 +48,16 @@ init_renderer :: proc(ren: ^Renderer) -> (ok: bool) {
 	ren.instance, gpu_err = gpu.create_instance(.D3D12, true)
 	check_gpu(gpu_err, "Could not create instance") or_return
 
+	resource_reqs := render_components_resource_requirements()
+
 	ren.device, gpu_err =
-	ren.instance->create_device({enable_validation = true, enable_graphics_api_validation = true})
+	ren.instance->create_device(
+		{
+			enable_validation = true,
+			enable_graphics_api_validation = true,
+			requirements = resource_reqs,
+		},
+	)
 	check_gpu(gpu_err, "Could not create device") or_return
 	ren.instance->set_device_debug_name(ren.device, "en device")
 
@@ -231,9 +238,14 @@ acquire_eph_buffer :: proc(ren: ^Renderer, size: u64) -> (buf: Resizable_Buffer)
 	return
 }
 
+KEEP_BUFFER_COUNT :: 3
 return_eph_buffer :: proc(ren: ^Renderer, buf: Resizable_Buffer) {
 	buf := buf
 	buf.len = 0
+	if len(ren.transfer.free_buffers) >= KEEP_BUFFER_COUNT {
+		destroy_resizable_buffer(&buf, ren)
+		return
+	}
 	append(&ren.transfer.free_buffers, buf)
 }
 
