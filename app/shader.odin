@@ -111,19 +111,28 @@ Target :: enum u8 {
 	METAL = 2,
 }
 
+Link_Time_Module :: enum {
+	DXIL,
+	SPIRV_METAL,
+}
+
+Session :: struct {
+	session: ^sp.ISession,
+}
+
 @(private)
-spawn_session :: proc(ctx: ^Shader_Context) -> ^sp.ISession {
+spawn_session :: proc(ctx: ^Shader_Context) -> (out: Session) {
 	target_dxil_desc := sp.TargetDesc {
 		structureSize = size_of(sp.TargetDesc),
-		format        = .DXIL,
+		format        = .HLSL,
 		flags         = {},
 		profile       = ctx.global_session->findProfile("sm_6_0"),
 	}
 
 	target_spirv_desc := sp.TargetDesc {
 		structureSize = size_of(sp.TargetDesc),
-		format        = .SPIRV,
-		flags         = {.GENERATE_SPIRV_DIRECTLY},
+		format        = .GLSL,
+		flags         = {},
 		profile       = ctx.global_session->findProfile("sm_6_0"),
 	}
 
@@ -154,10 +163,20 @@ spawn_session :: proc(ctx: ^Shader_Context) -> ^sp.ISession {
 		compilerOptionEntries    = &compiler_option_entries[0],
 		compilerOptionEntryCount = len(compiler_option_entries),
 	}
-	session: ^sp.ISession
-	slang_check(ctx.global_session->createSession(session_desc, &session))
-	return session
+	slang_check(ctx.global_session->createSession(session_desc, &out.session))
+
+	return
 }
+
+@(private = "file")
+end_session :: proc(session: Session) {
+	session.session->release()
+}
+
+@(private = "file")
+MAX_LINK_COMPONENTS :: 6
+@(private = "file")
+Component_Small_Array :: small_array.Small_Array(MAX_LINK_COMPONENTS, ^sp.IComponentType)
 
 compile_shader :: proc(
 	ctx: ^Shader_Context,
@@ -177,9 +196,9 @@ compile_shader :: proc(
 	code, diagnostics: ^IBlob
 	r: Result
 	session := spawn_session(ctx)
-	defer session->release()
+	defer end_session(session)
 
-	module: ^IModule = session->loadModule(path, &diagnostics)
+	module: ^IModule = session.session->loadModule(path, &diagnostics)
 	if module == nil {
 		log.errorf("Shader compile error: {}", path)
 	}
@@ -218,23 +237,29 @@ compile_shader :: proc(
 	}
 
 	for &output_set, stage in result {
+		if components[stage] == nil do continue
+		composing: Component_Small_Array
+		small_array.append(&composing, components[stage], module)
+
+		composed_program: ^IComponentType
+		r =
+		session.session->createCompositeComponentType(
+			raw_data(small_array.slice(&composing)),
+			small_array.len(composing),
+			&composed_program,
+			&diagnostics,
+		)
+		diagnostics_check(diagnostics)
+		slang_check(r)
+
+		linked_program: ^IComponentType
+		r = composed_program->link(&linked_program, &diagnostics)
+		diagnostics_check(diagnostics)
+		slang_check(r)
+
 		for &output, target in output_set {
-			if components[stage] == nil do continue
-			link_components := [2]^IComponentType{components[stage], module}
-
-			linked_program: ^IComponentType
-			r =
-			session->createCompositeComponentType(
-				raw_data(link_components[:]),
-				2,
-				&linked_program,
-				&diagnostics,
-			)
-			diagnostics_check(diagnostics)
-			slang_check(r)
-
 			target_code: ^IBlob
-			r = linked_program->getTargetCode(int(target), &target_code, &diagnostics)
+			r = linked_program->getEntryPointCode(0, int(target), &target_code, &diagnostics)
 			diagnostics_check(diagnostics)
 			slang_check(r)
 
@@ -245,14 +270,12 @@ compile_shader :: proc(
 			)
 
 			error: mem.Allocator_Error
-			output, error = make([]u8, code_size, allocator)
+			output, error = slice.clone(source_code, allocator)
 			if error != nil {
 				log.errorf("Failed to allocate memory for shader code")
 				ok = false
 				return
 			}
-
-			copy_slice(output, source_code)
 		}
 	}
 

@@ -96,45 +96,6 @@ main :: proc() {
 		(time.duration_milliseconds(time.stopwatch_duration(sw))),
 	)
 
-	time.stopwatch_reset(&sw)
-	time.stopwatch_start(&sw)
-	emit_draws_compiled, ok_emit_draws := compile_shader(
-		&session,
-		"assets/emit_draws.slang",
-		{.Compute_Shader},
-		allocator = context.temp_allocator,
-	)
-	if !ok_emit_draws {
-		log.errorf("Could not compile shader")
-		return
-	}
-	log_shader(emit_draws_compiled)
-	time.stopwatch_stop(&sw)
-
-	log.infof(
-		"Emit draws shader compiled in {} ms",
-		(time.duration_milliseconds(time.stopwatch_duration(sw))),
-	)
-
-	time.stopwatch_reset(&sw)
-	time.stopwatch_start(&sw)
-	emit_draws_compiled, ok_emit_draws = compile_shader(
-		&session,
-		"assets/emit_draws.slang",
-		{.Compute_Shader},
-		allocator = context.temp_allocator,
-	)
-	if !ok_emit_draws {
-		log.errorf("Could not compile shader")
-		return
-	}
-	time.stopwatch_stop(&sw)
-
-	log.infof(
-		"Emit draws shader again compiled in {} ms",
-		(time.duration_milliseconds(time.stopwatch_duration(sw))),
-	)
-
 	encode_cbor_to_file :: proc(name: string, data: $T) {
 		file, err := os.open(name, os.O_RDWR | os.O_CREATE | os.O_TRUNC)
 		if err != nil {
@@ -152,7 +113,6 @@ main :: proc() {
 	}
 
 	encode_cbor_to_file("forward.enshader", forward_compiled)
-	encode_cbor_to_file("emit_draws.enshader", emit_draws_compiled)
 
 	t, t_ok := texture_from_file(&ren, "assets/Avocado_baseColor.png")
 	if !t_ok {
@@ -160,6 +120,16 @@ main :: proc() {
 		return
 	}
 	defer destroy_texture(&t, &ren)
+
+	avo_basecolor_handle, add_texture_ok := resource_pool_add_texture(
+		&ren.resource_pool,
+		&ren,
+		t.srv,
+	)
+	if !add_texture_ok {
+		log.errorf("Failed to add texture to resource pool")
+		return
+	}
 
 	running := true
 	is_fullscreen := false

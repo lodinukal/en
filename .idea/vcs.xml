@@ -4,6 +4,5 @@
     <mapping directory="" vcs="Git" />
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/external/d3d12ma" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/external/slang" vcs="Git" />
   </component>
 </project>

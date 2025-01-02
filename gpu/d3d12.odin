@@ -1983,6 +1983,7 @@ create_1d_texture_view :: proc(
 	remaining_layers :=
 		(texture_desc.layer_num - desc.layer_offset) if desc.layer_num == REMAINING_LAYERS else desc.layer_num
 
+	out_descriptor = (^Descriptor)(descriptor)
 	switch desc.view_type {
 	case .Shader_Resource:
 		srv_desc: d3d12.SHADER_RESOURCE_VIEW_DESC
@@ -2239,6 +2240,7 @@ create_3d_texture_view :: proc(
 	remaining_mips :=
 		(texture_desc.mip_num - desc.mip_offset) if desc.mip_num == REMAINING_MIPS else desc.mip_num
 
+	out_descriptor = (^Descriptor)(descriptor)
 	switch desc.view_type {
 	case .Shader_Resource:
 		srv_desc: d3d12.SHADER_RESOURCE_VIEW_DESC
@@ -2302,10 +2304,11 @@ create_buffer_view :: proc(
 	descriptor.buffer_gpu_location = b.resource->GetGPUVirtualAddress() + desc.offset
 	descriptor.buffer_view_type = desc.view_type
 
+	out_descriptor = (^Descriptor)(descriptor)
 	switch desc.view_type {
 	case .Shader_Resource:
 		srv_desc: d3d12.SHADER_RESOURCE_VIEW_DESC
-		srv_desc.Format = format
+		srv_desc.Format = format if buffer_desc.structure_stride == 0 else .UNKNOWN
 		srv_desc.Shader4ComponentMapping = DEFAULT_SHADER_4_COMPONENT_MAPPING
 		srv_desc.ViewDimension = .BUFFER
 		srv_desc.Buffer.FirstElement = u64(element_offset)
@@ -2713,7 +2716,9 @@ update_descriptor_ranges :: proc(
 				d3d12_range.heap_type,
 				offset + u32(descriptor_index),
 			)
-			src := (^D3D12_Descriptor)(range.descriptors[descriptor_index]).cpu_descriptor
+			descriptor := (^D3D12_Descriptor)(range.descriptors[descriptor_index])
+			assert(descriptor != nil, "passed descriptor is nil")
+			src := descriptor.cpu_descriptor
 			p.device.device->CopyDescriptorsSimple(
 				1,
 				dst,

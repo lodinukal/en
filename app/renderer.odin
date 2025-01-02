@@ -36,7 +36,7 @@ Renderer :: struct {
 	// descriptor
 	descriptor_pool:  ^gpu.Descriptor_Pool,
 	// components
-	image_pool:       Image_Pool,
+	resource_pool:    Resource_Pool,
 }
 
 init_renderer :: proc(ren: ^Renderer) -> (ok: bool) {
@@ -48,14 +48,12 @@ init_renderer :: proc(ren: ^Renderer) -> (ok: bool) {
 	ren.instance, gpu_err = gpu.create_instance(.D3D12, true)
 	check_gpu(gpu_err, "Could not create instance") or_return
 
-	resource_reqs := render_components_resource_requirements()
-
 	ren.device, gpu_err =
 	ren.instance->create_device(
 		{
 			enable_validation = true,
 			enable_graphics_api_validation = true,
-			requirements = resource_reqs,
+			requirements = render_components_resource_requirements,
 		},
 	)
 	check_gpu(gpu_err, "Could not create device") or_return
@@ -105,11 +103,11 @@ init_renderer :: proc(ren: ^Renderer) -> (ok: bool) {
 
 	// descriptor pool
 	ren.descriptor_pool, gpu_err =
-	ren.instance->create_descriptor_pool(ren.device, render_components_descriptor_requirements())
+	ren.instance->create_descriptor_pool(ren.device, render_components_descriptor_requirements)
 	check_gpu(gpu_err, "Could not create descriptor pool") or_return
 
 	// image pool
-	if ok := init_image_pool(&ren.image_pool, ren); ok == false {
+	if ok := init_resource_pool(&ren.resource_pool, ren); ok == false {
 		return false
 	}
 
@@ -135,7 +133,7 @@ destroy_renderer :: proc(ren: ^Renderer) {
 	renderer_wait_idle(ren)
 
 	// destroy components
-	destroy_image_pool(&ren.image_pool, ren)
+	destroy_resource_pool(&ren.resource_pool, ren)
 
 	// destroy descriptor pool
 	ren.instance->destroy_descriptor_pool(ren.descriptor_pool)

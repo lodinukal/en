@@ -1,5 +1,4 @@
-#define DRAW_INDIRECT
-#include "common.slangh"
+import en;
 
 struct VertexStageOutput
 {
@@ -7,7 +6,7 @@ struct VertexStageOutput
     float4 tangent : TANGENT;
     float2 texcoord : TEXCOORD0;
     nointerpolation uint material_id : MATERIAL;
-    nointerpolation uint instance_id : INSTANCE;
+    nointerpolation uint transform_id : INSTANCE;
     float4 sv_position : SV_POSITION;
 };
 
@@ -25,19 +24,22 @@ cbuffer C
     column_major float4x4 projection;
 }
 
-StructuredBuffer<Material> materials : register(t0, space1);
+cbuffer DrawData : register(t0, space1)
+{
+    uint material_index;
+    uint transform_index;
+    uint vertex_offset;
+};
 
-SamplerState sampler : register(s0, space2);
-Texture2D textures[] : register(t1, space2);
-
-StructuredBuffer<Instance> instances : register(t0, space3);
+StructuredBuffer<Transform> transforms : register(t0, space2);
+StructuredBuffer<Material> materials : register(t1, space2);
+SamplerState sampler : register(s3, space2);
+Texture2D textures[] : register(t4, space2);
 
 [shader("vertex")]
-VertexStageOutput vs_main(Vertex input, DECLARE_DRAW_PARAMETERS)
+VertexStageOutput vs_main(Vertex input)
 {
-    Instance instance = instances[INSTANCE_ID];
-
-    float4x4 world = instance.transform;
+    float4x4 world = transforms[transform_index].transform;
     world = mul(mul(projection, view), world);
 
     float4 position = float4(input.position, 1.0);
@@ -47,8 +49,8 @@ VertexStageOutput vs_main(Vertex input, DECLARE_DRAW_PARAMETERS)
     output.sv_position = position;
     output.normal = input.normal;
     output.texcoord = input.texcoord;
-    output.instance_id = INSTANCE_ID;
-    output.material_id = instance.material_id;
+    output.transform_id = transform_index;
+    output.material_id = material_index;
 
     return output;
 };
