@@ -406,9 +406,7 @@ allocate_cpu_descriptor :: proc(
 	}
 
 	// take a free descriptor
-	handle := descriptors[len(descriptors) - 1]
-	pop(descriptors)
-	out_handle = handle
+	out_handle = pop(descriptors)
 	return
 }
 
@@ -2974,19 +2972,19 @@ create_graphics_pipeline :: proc(
 	for shader in desc.shaders {
 		assert(card(shader.stage) == 1, "Only one shader per stage is supported")
 		if shader.stage == {.Vertex_Shader} {
-			pso_desc.VS.pShaderBytecode = raw_data(shader.bytecode)
+			pso_desc.VS.pShaderBytecode = raw_data(shader.bytecode[.DXIL])
 			pso_desc.VS.BytecodeLength = len(shader.bytecode)
 		} else if shader.stage == {.Tess_Control_Shader} {
-			pso_desc.HS.pShaderBytecode = raw_data(shader.bytecode)
+			pso_desc.HS.pShaderBytecode = raw_data(shader.bytecode[.DXIL])
 			pso_desc.HS.BytecodeLength = len(shader.bytecode)
 		} else if shader.stage == {.Tess_Evaluation_Shader} {
-			pso_desc.DS.pShaderBytecode = raw_data(shader.bytecode)
+			pso_desc.DS.pShaderBytecode = raw_data(shader.bytecode[.DXIL])
 			pso_desc.DS.BytecodeLength = len(shader.bytecode)
 		} else if shader.stage == {.Geometry_Shader} {
-			pso_desc.GS.pShaderBytecode = raw_data(shader.bytecode)
+			pso_desc.GS.pShaderBytecode = raw_data(shader.bytecode[.DXIL])
 			pso_desc.GS.BytecodeLength = len(shader.bytecode)
 		} else if shader.stage == {.Fragment_Shader} {
-			pso_desc.PS.pShaderBytecode = raw_data(shader.bytecode)
+			pso_desc.PS.pShaderBytecode = raw_data(shader.bytecode[.DXIL])
 			pso_desc.PS.BytecodeLength = len(shader.bytecode)
 		} else {
 			error = .Unknown

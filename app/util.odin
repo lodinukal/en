@@ -2,7 +2,9 @@ package app
 
 import "core:log"
 import "core:strings"
-import "en:gpu"
+import "en:mercury"
+
+import "vendor:cgltf"
 import "vendor:stb/image"
 
 texture_from_file :: proc(
@@ -55,7 +57,7 @@ texture_from_file :: proc(
 		&texture,
 		renderer,
 		{subresource},
-		gpu.ACCESS_LAYOUT_STAGE_SHADER_RESOURCE,
+		mercury.ACCESS_LAYOUT_STAGE_SHADER_RESOURCE,
 	); err != nil {
 		ok = false
 		log.infof("Could not upload texture: {}", err)

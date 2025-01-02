@@ -7,7 +7,7 @@ import "core:mem"
 import "core:slice"
 import sp "external:slang/slang"
 
-import "en:gpu"
+import "en:mercury"
 
 slang_check :: #force_inline proc(#any_int result: int, loc := #caller_location) {
 	result := -sp.Result(result)
@@ -105,12 +105,6 @@ Shader_Stage :: enum {
 	Fragment,
 }
 
-Target :: enum u8 {
-	DXIL  = 0,
-	SPIRV = 1,
-	METAL = 2,
-}
-
 Link_Time_Module :: enum {
 	DXIL,
 	SPIRV_METAL,
@@ -181,10 +175,10 @@ Component_Small_Array :: small_array.Small_Array(MAX_LINK_COMPONENTS, ^sp.ICompo
 compile_shader :: proc(
 	ctx: ^Shader_Context,
 	path: cstring,
-	stages: gpu.Stage_Flags,
+	stages: mercury.Stage_Flags,
 	allocator := context.allocator,
 ) -> (
-	result: [Shader_Stage][Target][]u8,
+	result: [Shader_Stage][mercury.Shader_Target][]u8,
 	ok: bool = true,
 ) {
 	if ctx == nil {

@@ -10,6 +10,8 @@ import "core:log"
 import "core:os"
 import "core:time"
 
+import "en:mercury"
+
 // import nri "en:nri"
 import sdl "vendor:sdl2"
 
@@ -18,8 +20,8 @@ main :: proc() {
 	defer log.destroy_console_logger(logger)
 	context.logger = logger
 
+	track: mem.Tracking_Allocator
 	when ODIN_DEBUG {
-		track: mem.Tracking_Allocator
 		mem.tracking_allocator_init(&track, context.allocator)
 		context.allocator = mem.tracking_allocator(&track)
 
@@ -134,6 +136,7 @@ main :: proc() {
 	running := true
 	is_fullscreen := false
 	for running {
+		free_all(context.temp_allocator)
 		for ev: sdl.Event; sdl.PollEvent(&ev); {
 			#partial switch ev.type {
 			case .QUIT:
@@ -156,12 +159,74 @@ main :: proc() {
 				}
 			}
 		}
-		begin_rendering(&ren) or_break
+		cmd := begin_rendering(&ren) or_break
 		defer end_rendering(&ren)
+
+		frame := get_render_frame(&ren)
+
+		tex_barrier(
+			&ren,
+			{texture = frame.texture, after = mercury.ACCESS_LAYOUT_STAGE_COLOR_ATTACHMENT},
+		)
+		defer tex_barrier(
+			&ren,
+			{
+				texture = frame.texture,
+				before = mercury.ACCESS_LAYOUT_STAGE_COLOR_ATTACHMENT,
+				after = mercury.ACCESS_LAYOUT_STAGE_PRESENT,
+			},
+		)
+
+		ren.instance->cmd_begin_rendering(cmd, {colors = {frame.srv}})
+		defer ren.instance->cmd_end_rendering(cmd)
+		ren.instance->cmd_clear_attachments(
+			cmd,
+			{
+				{
+					value = (mercury.Color)(
+						[4]f32{f32(0x18) / 255.0, f32(0x18) / 255.0, f32(0x18) / 255.0, 1},
+					),
+					planes = {.Color},
+					color_attachment_index = 0,
+				},
+			},
+			{{x = 0, y = 0, width = u16(ren.window_size.x), height = u16(ren.window_size.y)}},
+		)
+
+		ren.instance->cmd_set_viewports(
+			cmd,
+			{
+				{
+					x = 0,
+					y = 0,
+					width = auto_cast ren.window_size.x,
+					height = auto_cast ren.window_size.y,
+					min_depth = 0,
+					max_depth = 1,
+				},
+			},
+		)
+
+		ren.instance->cmd_set_scissors(
+			cmd,
+			{
+				{
+					x = 0,
+					y = 0,
+					width = auto_cast ren.window_size.x,
+					height = auto_cast ren.window_size.y,
+				},
+			},
+		)
+		count := 0
+		for k, v in track.allocation_map {
+			count += 1
+		}
+		// log.infof("allocation count: {}", count)
 	}
 }
 
-log_shader :: proc(shaders: [Shader_Stage][Target][]u8) {
+log_shader :: proc(shaders: [Shader_Stage][mercury.Shader_Target][]u8) {
 	for code_set, stage in shaders {
 		for code, target in code_set {
 			if len(code) == 0 do continue

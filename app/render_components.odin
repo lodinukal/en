@@ -3,7 +3,7 @@ package app
 import "core:log"
 import "core:math/linalg/hlsl"
 import "core:slice"
-import "en:gpu"
+import "en:mercury"
 
 Draw_Constants :: struct {
 	material_index:  u32,
@@ -37,12 +37,12 @@ Resource_Pool :: struct {
 	//
 	transform_buffer:        Resizable_Buffer,
 	material_buffer:         Resizable_Buffer,
-	sampler:                 ^gpu.Descriptor,
+	sampler:                 ^mercury.Descriptor,
 	white_texture:           Texture,
 	black_texture:           Texture,
-	texture_descriptors:     [dynamic]^gpu.Descriptor,
+	texture_descriptors:     [dynamic]^mercury.Descriptor,
 	//
-	graphics_descriptor_set: ^gpu.Descriptor_Set,
+	graphics_descriptor_set: ^mercury.Descriptor_Set,
 }
 
 init_resource_pool :: proc(pool: ^Resource_Pool, renderer: ^Renderer) -> (ok: bool = true) {
@@ -103,7 +103,7 @@ init_resource_pool :: proc(pool: ^Resource_Pool, renderer: ^Renderer) -> (ok: bo
 		return
 	}
 
-	default_texture_desc: gpu.Texture_Desc
+	default_texture_desc: mercury.Texture_Desc
 	default_texture_desc.type = ._2D
 	default_texture_desc.layer_num = 1
 	default_texture_desc.mip_num = 1
@@ -154,7 +154,7 @@ init_resource_pool :: proc(pool: ^Resource_Pool, renderer: ^Renderer) -> (ok: bo
 		&white_texture,
 		renderer,
 		{subresource_upload_white},
-		gpu.ACCESS_LAYOUT_STAGE_SHADER_RESOURCE,
+		mercury.ACCESS_LAYOUT_STAGE_SHADER_RESOURCE,
 	); err != nil {
 		log.errorf("Could not upload white texture: {}", err)
 		ok = false
@@ -165,7 +165,7 @@ init_resource_pool :: proc(pool: ^Resource_Pool, renderer: ^Renderer) -> (ok: bo
 		&black_texture,
 		renderer,
 		{subresource_upload_black},
-		gpu.ACCESS_LAYOUT_STAGE_SHADER_RESOURCE,
+		mercury.ACCESS_LAYOUT_STAGE_SHADER_RESOURCE,
 	); err != nil {
 		log.errorf("Could not upload black texture: {}", err)
 		ok = false
@@ -215,15 +215,15 @@ resource_pool_bind :: proc(pool: ^Resource_Pool, renderer: ^Renderer) {
 
 resource_pool_descriptor_desc :: proc(
 	register_space: u32,
-	stages: gpu.Stage_Flags,
-) -> gpu.Descriptor_Set_Desc {
+	stages: mercury.Stage_Flags,
+) -> mercury.Descriptor_Set_Desc {
 	return {
 		register_space = register_space,
 		ranges = {
-			gpu.buffer_range(0, 1, stages = stages),
-			gpu.buffer_range(1, 1, stages = stages),
-			gpu.sampler_range(2, 1, stages = stages),
-			gpu.buffer_range(3, MAX_IMAGES, partial = true, stages = stages),
+			mercury.buffer_range(0, 1, stages = stages),
+			mercury.buffer_range(1, 1, stages = stages),
+			mercury.sampler_range(2, 1, stages = stages),
+			mercury.buffer_range(3, MAX_IMAGES, partial = true, stages = stages),
 		},
 	}
 }
@@ -231,7 +231,7 @@ resource_pool_descriptor_desc :: proc(
 resource_pool_add_texture :: proc(
 	pool: ^Resource_Pool,
 	renderer: ^Renderer,
-	texture: ^gpu.Descriptor,
+	texture: ^mercury.Descriptor,
 ) -> (
 	handle: Image_Handle,
 	ok: bool = true,
@@ -278,7 +278,7 @@ resource_pool_add_material :: proc(
 	err := append_buffer(
 		&pool.material_buffer,
 		slice.bytes_from_ptr(&material, size_of(Material)),
-		gpu.ACCESS_STAGE_SHADER_RESOURCE,
+		mercury.ACCESS_STAGE_SHADER_RESOURCE,
 		renderer,
 	)
 	if err != nil {
@@ -308,7 +308,7 @@ resource_pool_set_material :: proc(
 		&pool.material_buffer,
 		slice.bytes_from_ptr(&material, size_of(Material)),
 		size_of(Material) * u64(handle),
-		gpu.ACCESS_STAGE_SHADER_RESOURCE,
+		mercury.ACCESS_STAGE_SHADER_RESOURCE,
 		renderer,
 	)
 
@@ -328,7 +328,7 @@ resource_pool_add_transform :: proc(
 	err := append_buffer(
 		&pool.transform_buffer,
 		slice.bytes_from_ptr(&transform, size_of(Transform)),
-		gpu.ACCESS_STAGE_SHADER_RESOURCE,
+		mercury.ACCESS_STAGE_SHADER_RESOURCE,
 		renderer,
 	)
 	if err != nil {
@@ -358,22 +358,24 @@ resource_pool_set_transform :: proc(
 		&pool.transform_buffer,
 		slice.bytes_from_ptr(&transform, size_of(Transform)),
 		size_of(Transform) * u64(handle),
-		gpu.ACCESS_STAGE_SHADER_RESOURCE,
+		mercury.ACCESS_STAGE_SHADER_RESOURCE,
 		renderer,
 	)
 
 	return
 }
 
-render_components_descriptor_requirements: gpu.Descriptor_Pool_Desc : {
+render_components_descriptor_requirements: mercury.Descriptor_Pool_Desc : {
 	descriptor_set_max_num = 1,
 	sampler_max_num = 1,
 	texture_max_num = MAX_IMAGES,
 	buffer_max_num = 2,
 }
 
-render_components_resource_requirements: gpu.Resource_Requirements : {
+render_components_resource_requirements: mercury.Resource_Requirements : {
 	sampler_max_num = 1,
 	texture_max_num = MAX_IMAGES,
 	buffer_max_num = 2,
+	render_target_max_num = 4,
+	depth_stencil_target_max_num = 4,
 }

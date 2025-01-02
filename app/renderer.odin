@@ -1,40 +1,50 @@
 package app
 
 import "core:c"
+import "core:container/small_array"
 import "core:fmt"
 import "core:log"
 import "core:mem"
 
-import gpu "en:gpu"
+import "en:mercury"
 import sdl "vendor:sdl2"
 
 FRAME_BUF_NUM :: 3
+
+Frame :: struct {
+	allocator: ^mercury.Command_Allocator,
+	cmd:       ^mercury.Command_Buffer,
+	texture:   ^mercury.Texture,
+	srv:       ^mercury.Descriptor,
+}
 
 Renderer :: struct {
 	window:           ^sdl.Window,
 	window_size:      [2]c.int,
 	// gpu resources
-	instance:         ^gpu.Instance,
-	device:           ^gpu.Device,
+	instance:         ^mercury.Instance,
+	device:           ^mercury.Device,
 	// sync
-	main_fence:       ^gpu.Fence,
+	main_fence:       ^mercury.Fence,
 	main_fence_value: u64,
-	graphics_queue:   ^gpu.Command_Queue,
-	swapchain:        ^gpu.Swapchain,
+	graphics_queue:   ^mercury.Command_Queue,
+	swapchain:        ^mercury.Swapchain,
 	// frame
 	frame_index:      u64,
+	frames:           small_array.Small_Array(FRAME_BUF_NUM, Frame),
+	backbuffer_index: int,
 	// transfer
 	transfer:         struct {
 		in_progress:  bool,
-		queue:        ^gpu.Command_Queue,
-		allocator:    ^gpu.Command_Allocator,
-		buffer:       ^gpu.Command_Buffer,
-		fence:        ^gpu.Fence,
+		queue:        ^mercury.Command_Queue,
+		allocator:    ^mercury.Command_Allocator,
+		buffer:       ^mercury.Command_Buffer,
+		fence:        ^mercury.Fence,
 		fence_value:  u64,
 		free_buffers: [dynamic]Resizable_Buffer,
 	},
 	// descriptor
-	descriptor_pool:  ^gpu.Descriptor_Pool,
+	descriptor_pool:  ^mercury.Descriptor_Pool,
 	// components
 	resource_pool:    Resource_Pool,
 }
@@ -43,9 +53,9 @@ init_renderer :: proc(ren: ^Renderer) -> (ok: bool) {
 	assert(ren != nil, "Renderer is nil")
 	assert(ren.window != nil, "Window is nil")
 
-	gpu_err: gpu.Error
+	gpu_err: mercury.Error
 
-	ren.instance, gpu_err = gpu.create_instance(.D3D12, true)
+	ren.instance, gpu_err = mercury.create_instance(.D3D12, true)
 	check_gpu(gpu_err, "Could not create instance") or_return
 
 	ren.device, gpu_err =
@@ -91,6 +101,18 @@ init_renderer :: proc(ren: ^Renderer) -> (ok: bool) {
 	)
 	check_gpu(gpu_err, "Could not create swapchain") or_return
 
+	small_array.resize(&ren.frames, FRAME_BUF_NUM)
+	renderer_acquire_swapchain_resources(ren)
+	for &frame, index in small_array.slice(&ren.frames) {
+		frame.allocator, gpu_err = ren.instance->create_command_allocator(ren.graphics_queue)
+		check_gpu(gpu_err, "Could not create frame command allocator {}", index) or_return
+		ren.instance->set_command_allocator_debug_name(frame.allocator, "Frame allocator")
+
+		frame.cmd, gpu_err = ren.instance->create_command_buffer(frame.allocator)
+		check_gpu(gpu_err, "Could not create frame command buffer {}", index) or_return
+		ren.instance->set_command_buffer_debug_name(frame.cmd, "Frame buffer")
+	}
+
 	// inits the transfer
 	ren.transfer.queue, gpu_err = ren.instance->create_command_queue(ren.device, .Graphics)
 	check_gpu(gpu_err, "Could not create transfer queue") or_return
@@ -127,6 +149,36 @@ renderer_resize :: proc(ren: ^Renderer, size: [2]c.int) {
 		log.errorf("Could not resize swapchain: {}", result)
 		return
 	}
+	renderer_acquire_swapchain_resources(ren)
+}
+
+renderer_cleanup_swapchain_resources :: proc(ren: ^Renderer) {
+	for &frame, index in small_array.slice(&ren.frames) {
+		if frame.srv != nil {
+			ren.instance->destroy_descriptor(ren.device, frame.srv)
+			frame.srv = nil
+			frame.texture = nil
+		}
+	}
+}
+
+
+renderer_acquire_swapchain_resources :: proc(ren: ^Renderer) {
+	renderer_cleanup_swapchain_resources(ren)
+
+	textures: [FRAME_BUF_NUM]^mercury.Texture
+	gpu_err: mercury.Error
+	ren.instance->get_swapchain_textures(ren.swapchain, textures[:])
+	for texture, index in textures {
+		if texture == nil do continue
+		ren.frames.data[index].srv, gpu_err =
+		ren.instance->create_2d_texture_view(
+			ren.device,
+			{texture = texture, view_type = .Color_Attachment, format = .RGBA8_UNORM},
+		)
+		check_gpu(gpu_err, "Could not create srv for swapchain texture {}", index)
+		ren.frames.data[index].texture = texture
+	}
 }
 
 destroy_renderer :: proc(ren: ^Renderer) {
@@ -149,21 +201,58 @@ destroy_renderer :: proc(ren: ^Renderer) {
 	}
 	delete(ren.transfer.free_buffers)
 
+	renderer_cleanup_swapchain_resources(ren)
+	for &frame, index in small_array.slice(&ren.frames) {
+		if frame.cmd != nil {
+			ren.instance->destroy_command_buffer(frame.cmd)
+		}
+		if frame.allocator != nil {
+			ren.instance->destroy_command_allocator(frame.allocator)
+		}
+	}
+
 	ren.instance->destroy_swapchain(ren.swapchain)
 	ren.instance->destroy_fence(ren.main_fence)
 	ren.instance->destroy_device(ren.device)
 	ren.instance->destroy()
 }
 
-begin_rendering :: proc(ren: ^Renderer) -> (ok: bool = true) {
+get_render_frame :: proc(ren: ^Renderer) -> ^Frame {
+	return small_array.get_ptr(&ren.frames, ren.backbuffer_index)
+}
+
+get_frame :: proc(ren: ^Renderer) -> ^Frame {
+	return small_array.get_ptr(&ren.frames, int(ren.frame_index % FRAME_BUF_NUM))
+}
+
+begin_rendering :: proc(ren: ^Renderer) -> (cmd: ^mercury.Command_Buffer, ok: bool = true) {
+	frame := small_array.get(ren.frames, int(ren.frame_index % FRAME_BUF_NUM))
 	if ren.frame_index >= FRAME_BUF_NUM {
 		result := ren.instance->wait_fence_now(ren.main_fence, 1 + ren.frame_index - FRAME_BUF_NUM)
 		check_gpu(result, "Could not wait for fence") or_return
+		ren.instance->reset_command_allocator(frame.allocator)
 	}
+	cmd = frame.cmd
+	check_gpu(
+		ren.instance->begin_command_buffer(cmd),
+		"Could not begin command buffer {}",
+		ren.frame_index % FRAME_BUF_NUM,
+	)
+	ren.instance->cmd_set_descriptor_pool(cmd, ren.descriptor_pool)
+	ren.backbuffer_index = int(ren.instance->acquire_next_texture(ren.swapchain))
 	return
 }
 // rendering logic between begin_rendering and end_rendering
 end_rendering :: proc(ren: ^Renderer) -> (ok: bool = true) {
+	frame := small_array.get(ren.frames, int(ren.frame_index % FRAME_BUF_NUM))
+	check_gpu(
+		ren.instance->end_command_buffer(frame.cmd),
+		"Could not end command buffer {}",
+		ren.frame_index % FRAME_BUF_NUM,
+	)
+
+	ren.instance->submit(ren.graphics_queue, {frame.cmd})
+
 	result := ren.instance->present(ren.swapchain)
 	check_gpu(result, "Could not present swapchain") or_return
 	ren.frame_index += 1
@@ -173,7 +262,7 @@ end_rendering :: proc(ren: ^Renderer) -> (ok: bool = true) {
 }
 
 UPLOAD_PAGE_SIZE :: 64 * 1024 * 1024
-begin_transfer :: proc(ren: ^Renderer) -> (buf: ^gpu.Command_Buffer) {
+begin_transfer :: proc(ren: ^Renderer) -> (buf: ^mercury.Command_Buffer) {
 	if ren.transfer.in_progress {
 		buf = ren.transfer.buffer
 		return
@@ -208,6 +297,14 @@ end_transfer :: proc(ren: ^Renderer) -> (wait: u64) {
 wait_transfer :: proc(ren: ^Renderer, value: u64) -> (ok: bool = true) {
 	err := ren.instance->wait_fence_now(ren.transfer.fence, value)
 	return check_gpu(err, "Could not wait for fence")
+}
+
+tex_barrier :: proc(ren: ^Renderer, barrier: mercury.Texture_Barrier_Desc) {
+	ren.instance->cmd_barrier(get_frame(ren).cmd, {textures = {barrier}})
+}
+
+buf_barrier :: proc(ren: ^Renderer, barrier: mercury.Buffer_Barrier_Desc) {
+	ren.instance->cmd_barrier(get_frame(ren).cmd, {buffers = {barrier}})
 }
 
 acquire_eph_buffer :: proc(ren: ^Renderer, size: u64) -> (buf: Resizable_Buffer) {
@@ -249,7 +346,7 @@ return_eph_buffer :: proc(ren: ^Renderer, buf: Resizable_Buffer) {
 
 @(private = "file")
 check_gpu :: proc(
-	error: gpu.Error,
+	error: mercury.Error,
 	fmt_str: string,
 	args: ..any,
 	loc := #caller_location,
@@ -263,10 +360,10 @@ check_gpu :: proc(
 }
 
 Resizable_Buffer :: struct {
-	buffer: ^gpu.Buffer,
-	srv:    ^gpu.Descriptor,
-	uav:    ^gpu.Descriptor,
-	desc:   gpu.Buffer_Desc,
+	buffer: ^mercury.Buffer,
+	srv:    ^mercury.Descriptor,
+	uav:    ^mercury.Descriptor,
+	desc:   mercury.Buffer_Desc,
 	len:    u64,
 	name:   string,
 }
@@ -275,7 +372,7 @@ init_resizable_buffer :: proc(
 	buffer: ^Resizable_Buffer,
 	renderer: ^Renderer,
 ) -> (
-	error: gpu.Error,
+	error: mercury.Error,
 ) {
 	old_size := buffer.desc.size
 	buffer.desc.size = 0
@@ -301,7 +398,7 @@ resize_buffer :: proc(
 	new_size: u64,
 	renderer: ^Renderer,
 ) -> (
-	error: gpu.Error,
+	error: mercury.Error,
 ) {
 	if u64(buffer.desc.size) >= new_size || buffer.desc.size != 0 do return
 
@@ -323,7 +420,7 @@ resize_buffer :: proc(
 	}
 	buffer.buffer = new_buffer
 
-	format: gpu.Format = .UNKNOWN
+	format: mercury.Format = .UNKNOWN
 	if buffer.desc.structure_stride > 0 && renderer.instance.api == .D3D12 {
 		format = .R32_UINT
 	}
@@ -359,11 +456,11 @@ resize_buffer :: proc(
 append_buffer :: proc(
 	buffer: ^Resizable_Buffer,
 	data: []u8,
-	new_stage: gpu.Access_Stage,
+	new_stage: mercury.Access_Stage,
 	renderer: ^Renderer,
 	execute: bool = true,
 ) -> (
-	error: gpu.Error,
+	error: mercury.Error,
 ) {
 	if buffer.buffer == nil {
 		return .Invalid_Parameter
@@ -380,7 +477,7 @@ append_buffer :: proc(
 append_assume_buffer :: proc(
 	buffer: ^Resizable_Buffer,
 	data: []u8,
-	new_stage: gpu.Access_Stage,
+	new_stage: mercury.Access_Stage,
 	renderer: ^Renderer,
 	execute: bool = true,
 ) {
@@ -393,7 +490,7 @@ buffer_set :: proc(
 	buffer: ^Resizable_Buffer,
 	data: []u8,
 	offset: u64,
-	new_stage: gpu.Access_Stage,
+	new_stage: mercury.Access_Stage,
 	renderer: ^Renderer,
 	execute: bool = true,
 ) {
@@ -413,7 +510,7 @@ buffer_set :: proc(
 
 		renderer.instance->cmd_barrier(
 			cmd,
-			{buffers = {{buffer = buffer.buffer, after = gpu.ACCESS_STAGE_COPY_DESTINATION}}},
+			{buffers = {{buffer = buffer.buffer, after = mercury.ACCESS_STAGE_COPY_DESTINATION}}},
 		)
 
 		renderer.instance->cmd_copy_buffer(
@@ -431,7 +528,7 @@ buffer_set :: proc(
 				buffers = {
 					{
 						buffer = buffer.buffer,
-						before = gpu.ACCESS_STAGE_COPY_DESTINATION,
+						before = mercury.ACCESS_STAGE_COPY_DESTINATION,
 						after = new_stage,
 					},
 				},
@@ -461,16 +558,16 @@ buffer_set_name :: proc(buffer: ^Resizable_Buffer, name: string, renderer: ^Rend
 }
 
 Texture :: struct {
-	texture: ^gpu.Texture,
-	srv:     ^gpu.Descriptor,
-	uav:     ^gpu.Descriptor,
-	dsv:     ^gpu.Descriptor,
-	rtv:     ^gpu.Descriptor,
-	desc:    gpu.Texture_Desc,
+	texture: ^mercury.Texture,
+	srv:     ^mercury.Descriptor,
+	uav:     ^mercury.Descriptor,
+	dsv:     ^mercury.Descriptor,
+	rtv:     ^mercury.Descriptor,
+	desc:    mercury.Texture_Desc,
 	name:    string,
 }
 
-init_texture :: proc(texture: ^Texture, renderer: ^Renderer) -> (error: gpu.Error) {
+init_texture :: proc(texture: ^Texture, renderer: ^Renderer) -> (error: mercury.Error) {
 	texture.texture = renderer.instance->create_texture(renderer.device, texture.desc) or_return
 
 	if .Shader_Resource in texture.desc.usage {
@@ -622,12 +719,12 @@ texture_upload :: proc(
 	texture: ^Texture,
 	renderer: ^Renderer,
 	subresources: []Texture_Subresource_Upload_Desc = {},
-	after: gpu.Access_Layout_Stage = {},
+	after: mercury.Access_Layout_Stage = {},
 	layer_offset: u32 = 0,
 	mip_offset: u32 = 0,
 	execute: bool = true,
 ) -> (
-	error: gpu.Error,
+	error: mercury.Error,
 ) {
 	desc := renderer.instance->get_texture_desc(texture.texture)
 	device_desc := renderer.instance->get_device_desc(renderer.device)
@@ -660,21 +757,21 @@ texture_upload :: proc(
 					append_buffer(
 						&eph,
 						data,
-						gpu.ACCESS_STAGE_COPY_DESTINATION,
+						mercury.ACCESS_STAGE_COPY_DESTINATION,
 						renderer,
 						false,
 					) or_return
 				}
 			}
 
-			data_layout: gpu.Texture_Data_Layout_Desc
+			data_layout: mercury.Texture_Data_Layout_Desc
 			data_layout.offset = buffer_len_before
 			data_layout.row_pitch = u32(aligned_row_pitch)
 			data_layout.slice_pitch = u32(aligned_slice_pitch)
 
-			dst_region: gpu.Texture_Region_Desc
-			dst_region.layer_offset = gpu.dim(layer)
-			dst_region.mip_offset = gpu.mip(mip)
+			dst_region: mercury.Texture_Region_Desc
+			dst_region.layer_offset = mercury.dim(layer)
+			dst_region.mip_offset = mercury.mip(mip)
 
 			cmd := begin_transfer(renderer)
 			defer {
@@ -728,7 +825,12 @@ texture_upload :: proc(
 	return
 }
 
-compute_pitch :: proc(format: gpu.Format, width, height: u32) -> (row_pitch, slice_pitch: u32) {
+compute_pitch :: proc(
+	format: mercury.Format,
+	width, height: u32,
+) -> (
+	row_pitch, slice_pitch: u32,
+) {
 	#partial switch format {
 	case .BC1_RGBA_UNORM, .BC4_R_UNORM, .BC4_R_SNORM:
 		width_in_blocks := max(1, (width + 3) / 4)
@@ -745,7 +847,7 @@ compute_pitch :: proc(format: gpu.Format, width, height: u32) -> (row_pitch, sli
 		height_in_blocks := max(1, (height + 3) / 4)
 		return width_in_blocks * 16, width_in_blocks * 16 * height_in_blocks
 	}
-	bpp := int(gpu.FORMAT_PROPS[format].stride * 8)
+	bpp := int(mercury.FORMAT_PROPS[format].stride * 8)
 	row_pitch = u32((int(width) * bpp + 7) / 8)
 	slice_pitch = row_pitch * height
 	return

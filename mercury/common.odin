@@ -495,7 +495,6 @@ Instance :: struct {
 		name: string,
 	) -> mem.Allocator_Error,
 
-
 	// pipeline layout
 	create_pipeline_layout:           proc(
 		instance: ^Instance,
@@ -1470,9 +1469,15 @@ Sampler_Desc :: struct {
 	is_integer:                 bool,
 }
 
+Shader_Target :: enum {
+	DXIL,
+	SPIRV,
+	METAL,
+}
+
 Shader_Desc :: struct {
 	stage:            Stage_Flags,
-	bytecode:         []u8,
+	bytecode:         [Shader_Target][]u8,
 	entry_point_name: string,
 }
 
