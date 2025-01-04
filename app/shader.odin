@@ -120,21 +120,21 @@ spawn_session :: proc(ctx: ^Shader_Context) -> (out: Session) {
 		structureSize = size_of(sp.TargetDesc),
 		format        = .HLSL,
 		flags         = {},
-		profile       = ctx.global_session->findProfile("sm_6_0"),
+		profile       = ctx.global_session->findProfile("sm_6_6"),
 	}
 
 	target_spirv_desc := sp.TargetDesc {
 		structureSize = size_of(sp.TargetDesc),
 		format        = .GLSL,
 		flags         = {},
-		profile       = ctx.global_session->findProfile("sm_6_0"),
+		profile       = ctx.global_session->findProfile("sm_6_6"),
 	}
 
 	target_msl_desc := sp.TargetDesc {
 		structureSize = size_of(sp.TargetDesc),
 		format        = .METAL,
 		flags         = {},
-		profile       = ctx.global_session->findProfile("sm_6_0"),
+		profile       = ctx.global_session->findProfile("sm_6_6"),
 	}
 
 	targets := [?]sp.TargetDesc{target_dxil_desc, target_spirv_desc, target_msl_desc}

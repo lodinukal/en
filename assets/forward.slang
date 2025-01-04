@@ -60,6 +60,5 @@ float4 fs_main(VertexStageOutput input)
     : SV_TARGET
 {
     Material material = materials[input.material_id];
-
     return textures[material.albedo].Sample(sampler, input.texcoord);
 };
