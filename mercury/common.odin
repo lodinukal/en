@@ -5,7 +5,6 @@ import "core:log"
 import "core:mem"
 import "core:reflect"
 
-
 Error :: enum {
 	Success,
 	Out_Of_Memory,
@@ -1131,18 +1130,9 @@ Input_Assembly_Desc :: struct {
 	primitive_restart:      Primitive_Restart,
 }
 
-Vertex_Attribute_D3D :: struct {
-	semantic_name:  string,
-	semantic_index: u32,
-}
-
-Vertex_Attribute_VK :: struct {
-	location: u32,
-}
-
 Vertex_Attribute_Desc :: struct {
-	d3d:          Vertex_Attribute_D3D,
-	vk:           Vertex_Attribute_VK,
+	d3d_semantic: string,
+	vk_location:  u32,
 	offset:       u32,
 	format:       Format,
 	stream_index: u16,

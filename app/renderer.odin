@@ -26,7 +26,6 @@ Renderer :: struct {
 	device:           ^mercury.Device,
 	// sync
 	main_fence:       ^mercury.Fence,
-	main_fence_value: u64,
 	graphics_queue:   ^mercury.Command_Queue,
 	swapchain:        ^mercury.Swapchain,
 	// frame
@@ -69,7 +68,7 @@ init_renderer :: proc(ren: ^Renderer) -> (ok: bool) {
 	check_gpu(gpu_err, "Could not create device") or_return
 	ren.instance->set_device_debug_name(ren.device, "en device")
 
-	ren.main_fence, gpu_err = ren.instance->create_fence(ren.device, ren.main_fence_value)
+	ren.main_fence, gpu_err = ren.instance->create_fence(ren.device, 0)
 	check_gpu(gpu_err, "Could not create fence") or_return
 
 	desc := ren.instance->get_device_desc(ren.device)
@@ -129,7 +128,8 @@ init_renderer :: proc(ren: ^Renderer) -> (ok: bool) {
 	check_gpu(gpu_err, "Could not create descriptor pool") or_return
 
 	// image pool
-	if ok := init_resource_pool(&ren.resource_pool, ren); ok == false {
+	if ok_init_resource_pool := init_resource_pool(&ren.resource_pool, ren);
+	   ok_init_resource_pool == false {
 		return false
 	}
 
@@ -138,7 +138,7 @@ init_renderer :: proc(ren: ^Renderer) -> (ok: bool) {
 
 renderer_wait_idle :: proc(ren: ^Renderer) {
 	// wait for the current frame to finish rendering
-	ren.instance->wait_fence_now(ren.main_fence, ren.main_fence_value)
+	ren.instance->wait_fence_now(ren.main_fence, ren.frame_index)
 }
 
 renderer_resize :: proc(ren: ^Renderer, size: [2]c.int) {
@@ -153,7 +153,7 @@ renderer_resize :: proc(ren: ^Renderer, size: [2]c.int) {
 }
 
 renderer_cleanup_swapchain_resources :: proc(ren: ^Renderer) {
-	for &frame, index in small_array.slice(&ren.frames) {
+	for &frame in small_array.slice(&ren.frames) {
 		if frame.srv != nil {
 			ren.instance->destroy_descriptor(ren.device, frame.srv)
 			frame.srv = nil
@@ -161,7 +161,6 @@ renderer_cleanup_swapchain_resources :: proc(ren: ^Renderer) {
 		}
 	}
 }
-
 
 renderer_acquire_swapchain_resources :: proc(ren: ^Renderer) {
 	renderer_cleanup_swapchain_resources(ren)
@@ -202,7 +201,7 @@ destroy_renderer :: proc(ren: ^Renderer) {
 	delete(ren.transfer.free_buffers)
 
 	renderer_cleanup_swapchain_resources(ren)
-	for &frame, index in small_array.slice(&ren.frames) {
+	for &frame in small_array.slice(&ren.frames) {
 		if frame.cmd != nil {
 			ren.instance->destroy_command_buffer(frame.cmd)
 		}
@@ -223,6 +222,13 @@ get_render_frame :: proc(ren: ^Renderer) -> ^Frame {
 
 get_frame :: proc(ren: ^Renderer) -> ^Frame {
 	return small_array.get_ptr(&ren.frames, int(ren.frame_index % FRAME_BUF_NUM))
+}
+
+bind_descriptor_sets :: proc(ren: ^Renderer) {
+	frame := get_frame(ren)
+	cmd := frame.cmd
+	ren.instance->cmd_set_descriptor_set(cmd, 0, ren.resource_pool.draw_constants_descriptor_set)
+	ren.instance->cmd_set_descriptor_set(cmd, 1, ren.resource_pool.resource_descriptor_set)
 }
 
 begin_rendering :: proc(ren: ^Renderer) -> (cmd: ^mercury.Command_Buffer, ok: bool = true) {
@@ -361,6 +367,7 @@ check_gpu :: proc(
 
 Resizable_Buffer :: struct {
 	buffer: ^mercury.Buffer,
+	cbv:    ^mercury.Descriptor,
 	srv:    ^mercury.Descriptor,
 	uav:    ^mercury.Descriptor,
 	desc:   mercury.Buffer_Desc,
@@ -383,6 +390,9 @@ init_resizable_buffer :: proc(
 destroy_resizable_buffer :: proc(buffer: ^Resizable_Buffer, renderer: ^Renderer) {
 	if buffer.buffer != nil {
 		renderer.instance->destroy_buffer(buffer.buffer)
+	}
+	if buffer.cbv != nil {
+		renderer.instance->destroy_descriptor(renderer.device, buffer.cbv)
 	}
 	if buffer.srv != nil {
 		renderer.instance->destroy_descriptor(renderer.device, buffer.srv)
@@ -421,10 +431,22 @@ resize_buffer :: proc(
 	buffer.buffer = new_buffer
 
 	format: mercury.Format = .UNKNOWN
-	if buffer.desc.structure_stride > 0 && renderer.instance.api == .D3D12 {
+	if renderer.instance.api == .D3D12 {
 		format = .R32_UINT
 	}
 
+	if .Constant_Buffer in buffer.desc.usage {
+		buffer.cbv = renderer.instance->create_buffer_view(
+			renderer.device,
+			{
+				buffer = buffer.buffer,
+				view_type = .Constant,
+				size = buffer.desc.size,
+				format = format,
+			},
+		) or_return
+		renderer.instance->set_descriptor_debug_name(buffer.cbv, buffer.name)
+	}
 	if .Shader_Resource in buffer.desc.usage {
 		buffer.srv = renderer.instance->create_buffer_view(
 			renderer.device,
@@ -534,6 +556,7 @@ buffer_set :: proc(
 				},
 			},
 		)
+		return
 	}
 	assert(offset + u64(len(data)) <= buffer.desc.size, "Buffer overflow")
 	mapped, error := renderer.instance->map_buffer(buffer.buffer, offset, u64(len(data)))
@@ -751,7 +774,7 @@ texture_upload :: proc(
 			buffer_len_before := eph.len
 			for slice in 0 ..< subresource.slice_num {
 				for row in 0 ..< slice_row_num {
-					offset := uint(slice) * aligned_slice_pitch + uint(row) * aligned_row_pitch
+					// offset := uint(slice) * aligned_slice_pitch + uint(row) * aligned_row_pitch
 					data := subresource.slices[slice * subresource.slice_pitch +
 					row * subresource.row_pitch:][:subresource.row_pitch]
 					append_buffer(

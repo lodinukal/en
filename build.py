@@ -180,6 +180,7 @@ class Builder:
         args.append(f"-build-mode:{self.mode.name}")
         for define, value in self.defines.items():
             args.append(f"-define:{define}={value}")
+        args.append("-vet")
         subprocess.run(args, check=True)
 
     def run(self):

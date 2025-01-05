@@ -113,25 +113,71 @@ main :: proc() {
 			return
 		}
 	}
-
 	encode_cbor_to_file("forward.enshader", forward_compiled)
 
-	t, t_ok := texture_from_file(&ren, "assets/Avocado_baseColor.png")
-	if !t_ok {
-		log.errorf("Could not load texture")
-		return
-	}
-	defer destroy_texture(&t, &ren)
 
-	avo_basecolor_handle, add_texture_ok := resource_pool_add_texture(
-		&ren.resource_pool,
-		&ren,
-		t.srv,
+	forward_pipeline_layout, forward_pipeline_layout_err := ren.instance->create_pipeline_layout(
+		ren.device,
+		{
+			descriptor_sets = {
+				resource_pool_draws_descriptor_desc(0, {.Vertex_Shader, .Fragment_Shader}),
+				resource_pool_descriptor_desc(1, {.Vertex_Shader, .Fragment_Shader}),
+			},
+			shader_stages = {.Vertex_Shader, .Fragment_Shader},
+		},
 	)
-	if !add_texture_ok {
-		log.errorf("Failed to add texture to resource pool")
+	if forward_pipeline_layout_err != nil {
+		log.errorf("Could not create pipeline layout: {}", forward_pipeline_layout_err)
 		return
 	}
+	defer ren.instance->destroy_pipeline_layout(forward_pipeline_layout)
+	ren.instance->set_pipeline_layout_debug_name(
+		forward_pipeline_layout,
+		"Forward Pipeline Layout",
+	)
+
+	forward_pipeline, forward_pipeline_err := ren.instance->create_graphics_pipeline(
+		ren.device,
+		{
+			pipeline_layout = forward_pipeline_layout,
+			vertex_input = VERTEX_INPUT_DEFAULT,
+			input_assembly = {topology = .Triangle_List},
+			rasterization = {
+				viewport_num = 1,
+				fill_mode = .Solid,
+				cull_mode = .None,
+				front_counter_clockwise = true,
+			},
+			output_merger = {
+				colors = {{format = .RGBA8_UNORM, color_write_mask = mercury.Color_Write_RGBA}},
+			},
+			shaders = {
+				{
+					stage = {.Vertex_Shader},
+					bytecode = forward_compiled[.Vertex],
+					entry_point_name = "vs_main",
+				},
+				{
+					stage = {.Fragment_Shader},
+					bytecode = forward_compiled[.Fragment],
+					entry_point_name = "fs_main",
+				},
+			},
+		},
+	)
+	if forward_pipeline_err != nil {
+		log.errorf("Could not create pipeline: {}", forward_pipeline_err)
+		return
+	}
+	defer ren.instance->destroy_pipeline(forward_pipeline)
+	ren.instance->set_pipeline_debug_name(forward_pipeline, "Forward Pipeline")
+
+	scene, scene_ok := load_gltf_file(&ren, "assets/Avocado/Avocado.gltf")
+	if !scene_ok {
+		log.errorf("Could not load scene")
+		return
+	}
+	defer unload_scene(&ren, &scene)
 
 	running := true
 	is_fullscreen := false
@@ -179,12 +225,13 @@ main :: proc() {
 
 		ren.instance->cmd_begin_rendering(cmd, {colors = {frame.srv}})
 		defer ren.instance->cmd_end_rendering(cmd)
+
 		ren.instance->cmd_clear_attachments(
 			cmd,
 			{
 				{
 					value = (mercury.Color)(
-						[4]f32{f32(0x18) / 255.0, f32(0x18) / 255.0, f32(0x18) / 255.0, 1},
+						[4]f32{f32(0x06) / 255.0, f32(0x06) / 255.0, f32(0x06) / 255.0, 1},
 					),
 					planes = {.Color},
 					color_attachment_index = 0,
@@ -192,7 +239,6 @@ main :: proc() {
 			},
 			{{x = 0, y = 0, width = u16(ren.window_size.x), height = u16(ren.window_size.y)}},
 		)
-
 		ren.instance->cmd_set_viewports(
 			cmd,
 			{
@@ -218,12 +264,51 @@ main :: proc() {
 				},
 			},
 		)
-		count := 0
-		for k, v in track.allocation_map {
-			count += 1
+
+		ren.instance->cmd_set_pipeline_layout(cmd, forward_pipeline_layout)
+		ren.instance->cmd_set_pipeline(cmd, forward_pipeline)
+		bind_descriptor_sets(&ren)
+		for mesh in scene.meshes {
+			for prim in mesh.primitives {
+				ren.resource_pool.draws.material_index = prim.material
+				copy_draw_data(&ren.resource_pool)
+
+				position_buffer := scene.buffers[prim.positions.buffer]
+				normal_buffer := scene.buffers[prim.normals.buffer]
+				texcoord_buffer := scene.buffers[prim.texcoords.buffer]
+				ren.instance->cmd_set_vertex_buffers(
+					cmd,
+					0,
+					{position_buffer.buffer, normal_buffer.buffer, texcoord_buffer.buffer},
+					{prim.positions.offset, prim.normals.offset, prim.texcoords.offset},
+				)
+
+				index_buffer := scene.buffers[prim.indices.buffer]
+				ren.instance->cmd_set_index_buffer(
+					cmd,
+					index_buffer.buffer,
+					prim.indices.offset,
+					.Uint16,
+				)
+
+				ren.instance->cmd_draw_indexed(
+					cmd,
+					{
+						index_num = u32(prim.indices.size / 2),
+						instance_num = 1,
+						base_index = 0,
+						base_vertex = 0,
+						base_instance = 0,
+					},
+				)
+			}
 		}
-		// log.infof("allocation count: {}", count)
+
+		// count := 0
+		// for k, v in track.allocation_map do count += 1
 	}
+
+	renderer_wait_idle(&ren)
 }
 
 log_shader :: proc(shaders: [Shader_Stage][mercury.Shader_Target][]u8) {

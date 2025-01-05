@@ -63,78 +63,50 @@ diagnostics_check :: #force_inline proc(diagnostics: ^sp.IBlob, loc := #caller_l
 }
 
 @(private = "file")
-loaded: dynlib.Library
-
-@(private = "file")
-sp_createGlobalSession: proc "c" (
-	apiVersion: sp.Int,
-	outGlobalSession: ^^sp.IGlobalSession,
-) -> sp.Result
-@(private = "file")
-sp_shutdown: proc "c" ()
+slang_lib: struct {
+	__handle:            dynlib.Library,
+	createGlobalSession: proc "c" (
+		apiVersion: sp.Int,
+		outGlobalSession: ^^sp.IGlobalSession,
+	) -> sp.Result,
+	shutdown:            proc "c" (),
+}
 
 Shader_Context :: struct {
 	global_session: ^sp.IGlobalSession,
+	session:        ^sp.ISession,
 }
 
 create_shader_context :: proc(ctx: ^Shader_Context) -> (ok: bool = true) {
 	// attempt to load
-	if loaded == nil {
-		loaded = dynlib.load_library("slang.dll") or_return
-		sp_createGlobalSession =
-		auto_cast dynlib.symbol_address(loaded, "slang_createGlobalSession") or_return
-		sp_shutdown = auto_cast dynlib.symbol_address(loaded, "slang_shutdown") or_return
+	if slang_lib.__handle == nil {
+		count := dynlib.initialize_symbols(&slang_lib, "slang", "slang_") or_return
+		if count != 2 {
+			log.warnf("Could only load {} symbols", count)
+			return false
+		}
 	}
-	slang_check(sp_createGlobalSession(sp.API_VERSION, &ctx.global_session))
-	return
-}
-
-destroy_shader_context :: proc(ctx: ^Shader_Context) {
-	if ctx == nil do return
-	ctx.global_session->release()
-	if loaded != nil {
-		sp_shutdown()
-		dynlib.unload_library(loaded)
-		loaded = nil
-	}
-}
-
-Shader_Stage :: enum {
-	Compute,
-	Vertex,
-	Fragment,
-}
-
-Link_Time_Module :: enum {
-	DXIL,
-	SPIRV_METAL,
-}
-
-Session :: struct {
-	session: ^sp.ISession,
-}
-
-@(private)
-spawn_session :: proc(ctx: ^Shader_Context) -> (out: Session) {
+	slang_check(slang_lib.createGlobalSession(sp.API_VERSION, &ctx.global_session))
+	sm_6_profile := ctx.global_session->findProfile("sm_6_0")
 	target_dxil_desc := sp.TargetDesc {
 		structureSize = size_of(sp.TargetDesc),
-		format        = .HLSL,
+		format        = .DXIL,
 		flags         = {},
-		profile       = ctx.global_session->findProfile("sm_6_6"),
+		profile       = sm_6_profile,
 	}
 
 	target_spirv_desc := sp.TargetDesc {
 		structureSize = size_of(sp.TargetDesc),
-		format        = .GLSL,
+		format        = .SPIRV,
 		flags         = {},
-		profile       = ctx.global_session->findProfile("sm_6_6"),
+		profile       = sm_6_profile,
 	}
 
 	target_msl_desc := sp.TargetDesc {
 		structureSize = size_of(sp.TargetDesc),
 		format        = .METAL,
 		flags         = {},
-		profile       = ctx.global_session->findProfile("sm_6_6"),
+		profile       = sm_6_profile,
 	}
 
 	targets := [?]sp.TargetDesc{target_dxil_desc, target_spirv_desc, target_msl_desc}
@@ -157,14 +129,26 @@ spawn_session :: proc(ctx: ^Shader_Context) -> (out: Session) {
 		compilerOptionEntries    = &compiler_option_entries[0],
 		compilerOptionEntryCount = len(compiler_option_entries),
 	}
-	slang_check(ctx.global_session->createSession(session_desc, &out.session))
+	slang_check(ctx.global_session->createSession(session_desc, &ctx.session))
 
 	return
 }
 
-@(private = "file")
-end_session :: proc(session: Session) {
-	session.session->release()
+destroy_shader_context :: proc(ctx: ^Shader_Context) {
+	if ctx == nil do return
+	ctx.session->release()
+	ctx.global_session->release()
+	if slang_lib.__handle != nil {
+		slang_lib.shutdown()
+		dynlib.unload_library(slang_lib.__handle)
+		slang_lib.__handle = nil
+	}
+}
+
+Shader_Stage :: enum {
+	Compute,
+	Vertex,
+	Fragment,
 }
 
 @(private = "file")
@@ -186,24 +170,21 @@ compile_shader :: proc(
 		ok = false
 		return
 	}
-	using sp
-	code, diagnostics: ^IBlob
-	r: Result
-	session := spawn_session(ctx)
-	defer end_session(session)
+	diagnostics: ^sp.IBlob
+	r: sp.Result
 
-	module: ^IModule = session.session->loadModule(path, &diagnostics)
+	module: ^sp.IModule = ctx.session->loadModule(path, &diagnostics)
 	if module == nil {
 		log.errorf("Shader compile error: {}", path)
 	}
 	diagnostics_check(diagnostics)
 	defer module->release()
 
-	components: [Shader_Stage]^IComponentType
+	components: [Shader_Stage]^sp.IComponentType
 
 	// compute
 	if stages == {.Compute_Shader} {
-		entry_point: ^IEntryPoint
+		entry_point: ^sp.IEntryPoint
 		slang_check(module->findEntryPointByName("cs_main", &entry_point))
 		if entry_point == nil {
 			log.errorf("no compute shader entry point")
@@ -211,8 +192,8 @@ compile_shader :: proc(
 		}
 		components[.Compute] = entry_point
 	} else if stages == {.Vertex_Shader, .Fragment_Shader} {
-		vs_entry_point: ^IEntryPoint
-		fs_entry_point: ^IEntryPoint
+		vs_entry_point: ^sp.IEntryPoint
+		fs_entry_point: ^sp.IEntryPoint
 		slang_check(module->findEntryPointByName("vs_main", &vs_entry_point))
 		slang_check(module->findEntryPointByName("fs_main", &fs_entry_point))
 
@@ -235,9 +216,9 @@ compile_shader :: proc(
 		composing: Component_Small_Array
 		small_array.append(&composing, components[stage], module)
 
-		composed_program: ^IComponentType
+		composed_program: ^sp.IComponentType
 		r =
-		session.session->createCompositeComponentType(
+		ctx.session->createCompositeComponentType(
 			raw_data(small_array.slice(&composing)),
 			small_array.len(composing),
 			&composed_program,
@@ -246,16 +227,17 @@ compile_shader :: proc(
 		diagnostics_check(diagnostics)
 		slang_check(r)
 
-		linked_program: ^IComponentType
+		linked_program: ^sp.IComponentType
 		r = composed_program->link(&linked_program, &diagnostics)
 		diagnostics_check(diagnostics)
 		slang_check(r)
 
 		for &output, target in output_set {
-			target_code: ^IBlob
+			target_code: ^sp.IBlob
 			r = linked_program->getEntryPointCode(0, int(target), &target_code, &diagnostics)
 			diagnostics_check(diagnostics)
 			slang_check(r)
+			defer target_code->release()
 
 			code_size := target_code->getBufferSize()
 			source_code := slice.from_ptr(

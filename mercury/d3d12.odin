@@ -28,7 +28,7 @@ set_debug_name :: proc(obj: ^d3d12.IObject, name: string) -> (error: mem.Allocat
 	)
 	obj->SetPrivateData(
 		d3d12.WKPDID_D3DDebugObjectNameW_UUID,
-		u32(name_wide),
+		u32(name_wide * 2),
 		raw_data(name_buffer),
 	)
 	return
@@ -46,8 +46,8 @@ create_d3d12_instance :: proc(
 	out_instance: ^Instance,
 	error: Error,
 ) {
-	instance, alloc_err := new(D3D12_Instance)
-	if alloc_err != nil {
+	instance, error_alloc := new(D3D12_Instance)
+	if error_alloc != nil {
 		error = .Out_Of_Memory
 		return
 	}
@@ -208,8 +208,8 @@ create_buffer :: proc(
 	error: Error,
 ) {
 	d: ^D3D12_Device = (^D3D12_Device)(device)
-	buffer, alloc_err := new(D3D12_Buffer)
-	if alloc_err != nil {
+	buffer, error_alloc := new(D3D12_Buffer)
+	if error_alloc != nil {
 		error = .Out_Of_Memory
 		return
 	}
@@ -370,7 +370,7 @@ create_staging_heap :: proc(
 		)
 	}
 
-	arg, alloc_err := append(
+	_, error_alloc := append(
 		&d.heaps,
 		D3D12_Staging_Heap {
 			heap = heap,
@@ -378,7 +378,7 @@ create_staging_heap :: proc(
 			descriptor_size = descriptor_size,
 		},
 	)
-	if alloc_err != nil {
+	if error_alloc != nil {
 		error = .Out_Of_Memory
 		return
 	}
@@ -398,7 +398,7 @@ allocate_cpu_descriptor :: proc(
 
 	if len(descriptors) == 0 {
 		// add new heap
-		heap_index, heap_err := create_staging_heap(device, type)
+		_, heap_err := create_staging_heap(device, type)
 		if heap_err != nil {
 			error = heap_err
 			return
@@ -454,8 +454,8 @@ create_device :: proc(
 ) {
 	d3d12_instance: ^D3D12_Instance = (^D3D12_Instance)(instance)
 
-	device, alloc_err := new(D3D12_Device)
-	if alloc_err != nil {
+	device, error_alloc := new(D3D12_Device)
+	if error_alloc != nil {
 		error = .Out_Of_Memory
 		return
 	}
@@ -602,7 +602,7 @@ destroy_device :: proc(instance: ^Instance, device: ^Device) {
 	}
 	delete(d.heaps)
 
-	for descriptors, type in d.free_descriptors {
+	for descriptors in d.free_descriptors {
 		delete(descriptors)
 	}
 
@@ -662,8 +662,8 @@ create_command_allocator :: proc(
 ) {
 	q: ^D3D12_Command_Queue = (^D3D12_Command_Queue)(queue)
 	d: ^D3D12_Device = (^D3D12_Device)(q.device)
-	allocator, alloc_err := new(D3D12_Command_Allocator)
-	if alloc_err != nil {
+	allocator, error_alloc := new(D3D12_Command_Allocator)
+	if error_alloc != nil {
 		error = .Out_Of_Memory
 		return
 	}
@@ -732,8 +732,8 @@ create_command_buffer :: proc(
 	error: Error,
 ) {
 	a: ^D3D12_Command_Allocator = (^D3D12_Command_Allocator)(allocator)
-	buffer, alloc_err := new(D3D12_Command_Buffer)
-	if alloc_err != nil {
+	buffer, error_alloc := new(D3D12_Command_Buffer)
+	if error_alloc != nil {
 		error = .Out_Of_Memory
 		return
 	}
@@ -934,14 +934,13 @@ cmd_clear_attachments :: proc(
 	d3d_rect_len := u32(small_array.len(d3d_rects))
 	d3d_rect_data := raw_data(small_array.slice(&d3d_rects))
 
-
 	for clear_desc in clears {
 		if .Color in clear_desc.planes {
 			color: Colorf = clear_desc.value.(Color).(Colorf)
 			b.list->ClearRenderTargetView(
 				small_array.get(b.render_targets, int(clear_desc.color_attachment_index)),
 				&color,
-				u32(small_array.len(d3d_rects)),
+				d3d_rect_len,
 				d3d_rect_data,
 			)
 		} else {
@@ -1054,6 +1053,7 @@ cmd_set_vertex_buffers :: proc(
 ) {
 	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
 	vertex_buffer_views: small_array.Small_Array(16, d3d12.VERTEX_BUFFER_VIEW)
+	assert(b.pipeline != nil, "Pipeline must be set before setting vertex buffers")
 	for buffer, i in buffers {
 		if buffer != nil {
 			buf: ^D3D12_Buffer = (^D3D12_Buffer)(buffer)
@@ -1163,6 +1163,15 @@ cmd_set_descriptor_set :: proc(
 	ds: ^D3D12_Descriptor_Set = (^D3D12_Descriptor_Set)(set)
 
 	small_array.set(&b.descriptor_sets, int(set_index), ds)
+	for _, range_i in small_array.slice(&ds.ranges) {
+		gpu_ptr := get_descriptor_set_gpu_pointer(ds, u32(range_i), 0)
+		root_param := small_array.get(b.pipeline_layout.sets, int(set_index))
+		if b.is_graphics {
+			b.list->SetGraphicsRootDescriptorTable(u32(root_param + range_i), gpu_ptr)
+		} else {
+			b.list->SetComputeRootDescriptorTable(u32(root_param + range_i), gpu_ptr)
+		}
+	}
 }
 
 cmd_set_constants :: proc(instance: ^Instance, cmd: ^Command_Buffer, index: u32, data: []u32) {
@@ -1501,7 +1510,7 @@ cmd_readback_texture_to_buffer :: proc(
 	src_region: Texture_Region_Desc,
 ) {
 	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
-	d: ^D3D12_Buffer = (^D3D12_Buffer)(dst_buffer)
+	// d: ^D3D12_Buffer = (^D3D12_Buffer)(dst_buffer)
 	s: ^D3D12_Texture = (^D3D12_Texture)(src_texture)
 
 	src_texture_copy_location: d3d12.TEXTURE_COPY_LOCATION
@@ -1754,8 +1763,8 @@ create_command_queue :: proc(
 	error: Error,
 ) {
 	d: ^D3D12_Device = (^D3D12_Device)(device)
-	queue, alloc_err := new(D3D12_Command_Queue)
-	if alloc_err != nil {
+	queue, error_alloc := new(D3D12_Command_Queue)
+	if error_alloc != nil {
 		error = .Out_Of_Memory
 		return
 	}
@@ -1965,12 +1974,12 @@ create_1d_texture_view :: proc(
 	out_descriptor: ^Descriptor,
 	error: Error,
 ) {
-	i: ^D3D12_Instance = (^D3D12_Instance)(instance)
+	// i: ^D3D12_Instance = (^D3D12_Instance)(instance)
 	d: ^D3D12_Device = (^D3D12_Device)(device)
 	t: ^D3D12_Texture = (^D3D12_Texture)(desc.texture)
 
-	descriptor, alloc_err := new(D3D12_Descriptor)
-	if alloc_err != nil {
+	descriptor, error_alloc := new(D3D12_Descriptor)
+	if error_alloc != nil {
 		error = .Out_Of_Memory
 		return
 	}
@@ -2087,12 +2096,12 @@ create_2d_texture_view :: proc(
 	out_descriptor: ^Descriptor,
 	error: Error,
 ) {
-	i: ^D3D12_Instance = (^D3D12_Instance)(instance)
+	// i: ^D3D12_Instance = (^D3D12_Instance)(instance)
 	d: ^D3D12_Device = (^D3D12_Device)(device)
 	t: ^D3D12_Texture = (^D3D12_Texture)(desc.texture)
 
-	descriptor, alloc_err := new(D3D12_Descriptor)
-	if alloc_err != nil {
+	descriptor, error_alloc := new(D3D12_Descriptor)
+	if error_alloc != nil {
 		error = .Out_Of_Memory
 		return
 	}
@@ -2224,12 +2233,12 @@ create_3d_texture_view :: proc(
 	out_descriptor: ^Descriptor,
 	error: Error,
 ) {
-	i: ^D3D12_Instance = (^D3D12_Instance)(instance)
+	// i: ^D3D12_Instance = (^D3D12_Instance)(instance)
 	d: ^D3D12_Device = (^D3D12_Device)(device)
 	t: ^D3D12_Texture = (^D3D12_Texture)(desc.texture)
 
-	descriptor, alloc_err := new(D3D12_Descriptor)
-	if alloc_err != nil {
+	descriptor, error_alloc := new(D3D12_Descriptor)
+	if error_alloc != nil {
 		error = .Out_Of_Memory
 		return
 	}
@@ -2279,12 +2288,12 @@ create_buffer_view :: proc(
 	out_descriptor: ^Descriptor,
 	error: Error,
 ) {
-	i: ^D3D12_Instance = (^D3D12_Instance)(instance)
+	// i: ^D3D12_Instance = (^D3D12_Instance)(instance)
 	d: ^D3D12_Device = (^D3D12_Device)(device)
 	b: ^D3D12_Buffer = (^D3D12_Buffer)(desc.buffer)
 
-	descriptor, alloc_err := new(D3D12_Descriptor)
-	if alloc_err != nil {
+	descriptor, error_alloc := new(D3D12_Descriptor)
+	if error_alloc != nil {
 		error = .Out_Of_Memory
 		return
 	}
@@ -2394,11 +2403,11 @@ create_sampler :: proc(
 	out_sampler: ^Descriptor,
 	error: Error,
 ) {
-	i: ^D3D12_Instance = (^D3D12_Instance)(instance)
+	// i: ^D3D12_Instance = (^D3D12_Instance)(instance)
 	d: ^D3D12_Device = (^D3D12_Device)(device)
 
-	descriptor, alloc_err := new(D3D12_Descriptor)
-	if alloc_err != nil {
+	descriptor, error_alloc := new(D3D12_Descriptor)
+	if error_alloc != nil {
 		error = .Out_Of_Memory
 		return
 	}
@@ -2471,12 +2480,13 @@ D3D12_Descriptor_Heap :: struct {
 }
 
 D3D12_Descriptor_Pool :: struct {
-	using _:         Descriptor_Pool,
-	device:          ^D3D12_Device,
+	using _:              Descriptor_Pool,
+	device:               ^D3D12_Device,
 	// CBV/SRV/UAV and Sampler heaps
-	heap_info:       [D3D12_Descriptor_Type]D3D12_Descriptor_Heap,
-	heap_objects:    small_array.Small_Array(2, ^d3d12.IDescriptorHeap),
-	descriptor_sets: [dynamic]D3D12_Descriptor_Set,
+	heap_info:            [D3D12_Descriptor_Type]D3D12_Descriptor_Heap,
+	heap_objects:         small_array.Small_Array(2, ^d3d12.IDescriptorHeap),
+	descriptor_sets:      []D3D12_Descriptor_Set,
+	used_descriptor_sets: uint,
 }
 
 create_descriptor_pool :: proc(
@@ -2488,8 +2498,8 @@ create_descriptor_pool :: proc(
 	error: Error,
 ) {
 	d: ^D3D12_Device = (^D3D12_Device)(device)
-	pool, alloc_err := new(D3D12_Descriptor_Pool)
-	if alloc_err != nil {
+	pool, error_alloc := new(D3D12_Descriptor_Pool)
+	if error_alloc != nil {
 		error = .Out_Of_Memory
 		return
 	}
@@ -2534,8 +2544,7 @@ create_descriptor_pool :: proc(
 		small_array.append(&pool.heap_objects, info.heap)
 	}
 
-	resize(&pool.descriptor_sets, desc.descriptor_set_max_num)
-	clear(&pool.descriptor_sets)
+	pool.descriptor_sets = make([]D3D12_Descriptor_Set, desc.descriptor_set_max_num)
 
 	out_pool = (^Descriptor_Pool)(pool)
 	return
@@ -2622,11 +2631,11 @@ allocate_descriptor_set :: proc(
 	error: Error,
 ) {
 	p: ^D3D12_Descriptor_Pool = (^D3D12_Descriptor_Pool)(pool)
-	if len(p.descriptor_sets) == cap(p.descriptor_sets) {
+	if len(p.descriptor_sets) == int(p.used_descriptor_sets) {
 		log.debugf(
 			"Descriptor set pool is full, %d, %d",
+			p.used_descriptor_sets,
 			len(p.descriptor_sets),
-			cap(p.descriptor_sets),
 		)
 		error = .Out_Of_Memory
 		return
@@ -2635,10 +2644,15 @@ allocate_descriptor_set :: proc(
 	set.pool = p
 
 	assert(len(desc.ranges) <= MAX_RANGES_PER_DESCRIPTOR_SET)
-	for range_desc, range_index in desc.ranges {
+	for range_desc in desc.ranges {
 		type := EN_TO_D3D12_DESCRIPTOR_TYPE[range_desc.descriptor_type]
 		index, err := allocate_descriptors_from_descriptor_pool(p, type, range_desc.descriptor_num)
 		if err != nil {
+			log.debugf(
+				"Failed to allocate descriptors from pool {} {}",
+				range_desc.descriptor_type,
+				err,
+			)
 			error = .Out_Of_Memory
 			return
 		}
@@ -2648,22 +2662,20 @@ allocate_descriptor_set :: proc(
 		)
 	}
 
-	index, err := append(&p.descriptor_sets, set)
-	if err != nil {
-		error = .Out_Of_Memory
-		return
-	}
-	out_set = (^Descriptor_Set)(&p.descriptor_sets[index - 1])
+	index := p.used_descriptor_sets
+	p.used_descriptor_sets += 1
+	p.descriptor_sets[index] = set
+	out_set = (^Descriptor_Set)(&p.descriptor_sets[index])
 
 	return
 }
 
 reset_descriptor_pool :: proc(instance: ^Instance, pool: ^Descriptor_Pool) {
 	p: ^D3D12_Descriptor_Pool = (^D3D12_Descriptor_Pool)(pool)
-	for &info, type in p.heap_info {
+	for &info in p.heap_info {
 		info.allocated_descriptors = 0
 	}
-	clear(&p.descriptor_sets)
+	p.used_descriptor_sets = 0
 }
 
 D3D12_Descriptor_Range :: struct {
@@ -2683,7 +2695,7 @@ get_descriptor_set_cpu_pointer :: proc(
 ) -> d3d12.CPU_DESCRIPTOR_HANDLE {
 	range := small_array.get(set.ranges, int(index))
 	heap_offset := offset + range.heap_offset
-	return get_cpu_pointer_from_descriptor_pool(set.pool, range.heap_type, offset)
+	return get_cpu_pointer_from_descriptor_pool(set.pool, range.heap_type, heap_offset)
 }
 
 get_descriptor_set_gpu_pointer :: proc(
@@ -2692,7 +2704,7 @@ get_descriptor_set_gpu_pointer :: proc(
 ) -> d3d12.GPU_DESCRIPTOR_HANDLE {
 	range := small_array.get(set.ranges, int(index))
 	heap_offset := offset + range.heap_offset
-	return get_gpu_pointer_from_descriptor_pool(set.pool, range.heap_type, offset)
+	return get_gpu_pointer_from_descriptor_pool(set.pool, range.heap_type, heap_offset)
 }
 
 update_descriptor_ranges :: proc(
@@ -2742,8 +2754,8 @@ create_fence :: proc(
 	error: Error,
 ) {
 	d: ^D3D12_Device = (^D3D12_Device)(device)
-	fence, alloc_err := new(D3D12_Fence)
-	if alloc_err != nil {
+	fence, error_alloc := new(D3D12_Fence)
+	if error_alloc != nil {
 		error = .Out_Of_Memory
 		return
 	}
@@ -2958,8 +2970,8 @@ create_graphics_pipeline :: proc(
 ) {
 	d: ^D3D12_Device = (^D3D12_Device)(device)
 	layout: ^D3D12_Pipeline_Layout = (^D3D12_Pipeline_Layout)(desc.pipeline_layout)
-	pipeline, alloc_err := new(D3D12_Pipeline)
-	if alloc_err != nil {
+	pipeline, error_alloc := new(D3D12_Pipeline)
+	if error_alloc != nil {
 		error = .Out_Of_Memory
 		return
 	}
@@ -2973,19 +2985,19 @@ create_graphics_pipeline :: proc(
 		assert(card(shader.stage) == 1, "Only one shader per stage is supported")
 		if shader.stage == {.Vertex_Shader} {
 			pso_desc.VS.pShaderBytecode = raw_data(shader.bytecode[.DXIL])
-			pso_desc.VS.BytecodeLength = len(shader.bytecode)
+			pso_desc.VS.BytecodeLength = len(shader.bytecode[.DXIL])
 		} else if shader.stage == {.Tess_Control_Shader} {
 			pso_desc.HS.pShaderBytecode = raw_data(shader.bytecode[.DXIL])
-			pso_desc.HS.BytecodeLength = len(shader.bytecode)
+			pso_desc.HS.BytecodeLength = len(shader.bytecode[.DXIL])
 		} else if shader.stage == {.Tess_Evaluation_Shader} {
 			pso_desc.DS.pShaderBytecode = raw_data(shader.bytecode[.DXIL])
-			pso_desc.DS.BytecodeLength = len(shader.bytecode)
+			pso_desc.DS.BytecodeLength = len(shader.bytecode[.DXIL])
 		} else if shader.stage == {.Geometry_Shader} {
 			pso_desc.GS.pShaderBytecode = raw_data(shader.bytecode[.DXIL])
-			pso_desc.GS.BytecodeLength = len(shader.bytecode)
+			pso_desc.GS.BytecodeLength = len(shader.bytecode[.DXIL])
 		} else if shader.stage == {.Fragment_Shader} {
 			pso_desc.PS.pShaderBytecode = raw_data(shader.bytecode[.DXIL])
-			pso_desc.PS.BytecodeLength = len(shader.bytecode)
+			pso_desc.PS.BytecodeLength = len(shader.bytecode[.DXIL])
 		} else {
 			error = .Unknown
 			return
@@ -2994,35 +3006,34 @@ create_graphics_pipeline :: proc(
 
 	// vertex input
 	attribute_num := len(desc.vertex_input.attributes)
-	if attribute_num > 0 {
-		elements: small_array.Small_Array(MAX_VERTEX_ATTRIBUTES, d3d12.INPUT_ELEMENT_DESC)
-		pso_desc.InputLayout.pInputElementDescs = raw_data(small_array.slice(&elements))
-		pso_desc.InputLayout.NumElements = u32(attribute_num)
+	elements: small_array.Small_Array(MAX_VERTEX_ATTRIBUTES, d3d12.INPUT_ELEMENT_DESC)
+	pso_desc.InputLayout.pInputElementDescs = raw_data(small_array.slice(&elements))
+	pso_desc.InputLayout.NumElements = u32(attribute_num)
+	for attr in desc.vertex_input.attributes {
+		element: d3d12.INPUT_ELEMENT_DESC
+		stream := desc.vertex_input.streams[attr.stream_index]
+		is_per_vertex := stream.step_rate == .Per_Vertex
+		semantic_name := strings.clone_to_cstring(
+			attr.d3d_semantic,
+			allocator = context.temp_allocator,
+		)
+		log.infof("semantic: {}", attr.d3d_semantic)
+		element.SemanticName = semantic_name
+		element.SemanticIndex = 0
+		element.Format = EN_TO_DXGI_FORMAT_TYPED[attr.format]
+		element.InputSlot = u32(stream.binding_slot)
+		element.AlignedByteOffset = u32(attr.offset)
+		element.InputSlotClass = .PER_VERTEX_DATA if is_per_vertex else .PER_INSTANCE_DATA
+		element.InstanceDataStepRate = 0 if is_per_vertex else 1
+		small_array.append(&elements, element)
+	}
 
-		for attr, i in desc.vertex_input.attributes {
-			element: d3d12.INPUT_ELEMENT_DESC
-			stream := desc.vertex_input.streams[attr.stream_index]
-			is_per_vertex := stream.step_rate == .Per_Vertex
-			semantic_name := strings.clone_to_cstring(
-				attr.d3d.semantic_name,
-				allocator = context.temp_allocator,
-			)
-			element.SemanticName = semantic_name
-			element.SemanticIndex = u32(attr.d3d.semantic_index)
-			element.Format = EN_TO_DXGI_FORMAT_TYPED[attr.format]
-			element.InputSlot = u32(stream.binding_slot)
-			element.AlignedByteOffset = u32(attr.offset)
-			element.InputSlotClass = .PER_VERTEX_DATA if is_per_vertex else .PER_INSTANCE_DATA
-			element.InstanceDataStepRate = 0 if is_per_vertex else 1
-		}
-
-		for stream in desc.vertex_input.streams {
-			assert(
-				stream.binding_slot < MAX_VERTEX_STREAMS,
-				"Vertex stream binding slot is out of range",
-			)
-			pipeline.ia_strides[stream.binding_slot] = u32(stream.stride)
-		}
+	for stream in desc.vertex_input.streams {
+		assert(
+			stream.binding_slot < MAX_VERTEX_STREAMS,
+			"Vertex stream binding slot is out of range",
+		)
+		pipeline.ia_strides[stream.binding_slot] = u32(stream.stride)
 	}
 
 	// IA
@@ -3267,8 +3278,8 @@ create_pipeline_layout :: proc(
 	error: Error,
 ) {
 	d: ^D3D12_Device = (^D3D12_Device)(device)
-	layout, alloc_err := new(D3D12_Pipeline_Layout)
-	if alloc_err != nil {
+	layout, error_alloc := new(D3D12_Pipeline_Layout)
+	if error_alloc != nil {
 		error = .Out_Of_Memory
 		return
 	}
@@ -3286,13 +3297,13 @@ create_pipeline_layout :: proc(
 
 	for set_desc, set_index in desc.descriptor_sets {
 		small_array.set(&layout.sets, set_index, small_array.len(layout.root_params))
-		local_root_param: d3d12.ROOT_PARAMETER1
-		local_root_param.ParameterType = .DESCRIPTOR_TABLE
-		local_root_param.ShaderVisibility = .ALL
-		local_root_param.DescriptorTable.NumDescriptorRanges = u32(len(set_desc.ranges))
+		for range_desc in set_desc.ranges {
+			local_root_param: d3d12.ROOT_PARAMETER1
+			local_root_param.ParameterType = .DESCRIPTOR_TABLE
+			local_root_param.ShaderVisibility = .ALL
+			local_root_param.DescriptorTable.NumDescriptorRanges = 1
 
-		range_start := small_array.len(layout.ranges)
-		for range_desc, range_index in set_desc.ranges {
+			range_start := small_array.len(layout.ranges)
 			d3d_range: d3d12.DESCRIPTOR_RANGE1
 			d3d_range.RangeType = EN_TO_D3D12_DESCRIPTOR_RANGE_TYPE[range_desc.descriptor_type]
 			d3d_range.NumDescriptors = range_desc.descriptor_num
@@ -3308,16 +3319,16 @@ create_pipeline_layout :: proc(
 			}
 
 			small_array.append(&layout.ranges, d3d_range)
-		}
-		local_root_param.DescriptorTable.pDescriptorRanges = raw_data(
-			small_array.slice(&layout.ranges)[range_start:],
-		)
+			local_root_param.DescriptorTable.pDescriptorRanges = raw_data(
+				small_array.slice(&layout.ranges)[range_start:][:1],
+			)
 
-		small_array.append(&layout.root_params, local_root_param)
+			small_array.append(&layout.root_params, local_root_param)
+		}
 	}
 
 	layout.base_root_constant = small_array.len(layout.root_params)
-	for root_constant_desc, root_constant_index in desc.constants {
+	for root_constant_desc in desc.constants {
 		local_root_param: d3d12.ROOT_PARAMETER1
 		local_root_param.ParameterType = ._32BIT_CONSTANTS
 		local_root_param.ShaderVisibility = shader_stages_to_visibility(
@@ -3455,7 +3466,7 @@ create_swapchain :: proc(
 	error: Error,
 ) {
 	i: ^D3D12_Instance = (^D3D12_Instance)(instance)
-	d: ^D3D12_Device = (^D3D12_Device)(device)
+	// d: ^D3D12_Device = (^D3D12_Device)(device)
 	queue: ^D3D12_Command_Queue = (^D3D12_Command_Queue)(desc.command_queue)
 
 	if queue == nil {
@@ -3463,8 +3474,8 @@ create_swapchain :: proc(
 		return
 	}
 
-	swapchain, alloc_err := new(D3D12_Swapchain)
-	if alloc_err != nil {
+	swapchain, error_alloc := new(D3D12_Swapchain)
+	if error_alloc != nil {
 		error = .Out_Of_Memory
 		return
 	}
@@ -3939,8 +3950,8 @@ create_texture :: proc(
 ) {
 	desc := desc
 	d: ^D3D12_Device = (^D3D12_Device)(device)
-	texture, alloc_err := new(D3D12_Texture)
-	if alloc_err != nil {
+	texture, error_alloc := new(D3D12_Texture)
+	if error_alloc != nil {
 		error = .Out_Of_Memory
 		return
 	}
@@ -4044,8 +4055,8 @@ texture_desc_from_resource :: proc(resource: ^d3d12.IResource) -> (out: Texture_
 }
 
 texture_from_resource :: proc(resource: ^d3d12.IResource) -> ^Texture {
-	t, alloc_err := new(D3D12_Texture)
-	if alloc_err != nil {
+	t, error_alloc := new(D3D12_Texture)
+	if error_alloc != nil {
 		panic("Out of memory")
 	}
 	t.desc = texture_desc_from_resource(resource)
