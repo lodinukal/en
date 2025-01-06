@@ -1,11 +1,11 @@
 package app
 
 import "core:encoding/cbor"
-
 @(require) import "core:fmt"
-
 import "core:io"
 import "core:log"
+import "core:math"
+import "core:math/linalg"
 @(require) import "core:mem"
 import "core:os"
 import "core:time"
@@ -14,6 +14,14 @@ import "en:mercury"
 
 // import nri "en:nri"
 import sdl "vendor:sdl2"
+
+Mouse_Button :: enum u8 {
+	Left   = sdl.BUTTON_LEFT,
+	Middle = sdl.BUTTON_MIDDLE,
+	Right  = sdl.BUTTON_RIGHT,
+	X1     = sdl.BUTTON_X1,
+	X2     = sdl.BUTTON_X2,
+}
 
 main :: proc() {
 	logger := log.create_console_logger(ident = "en")
@@ -145,11 +153,13 @@ main :: proc() {
 			rasterization = {
 				viewport_num = 1,
 				fill_mode = .Solid,
-				cull_mode = .None,
+				cull_mode = .Back,
 				front_counter_clockwise = true,
 			},
 			output_merger = {
 				colors = {{format = .RGBA8_UNORM, color_write_mask = mercury.Color_Write_RGBA}},
+				depth = {write = true, compare_func = .Less},
+				depth_stencil_format = .D32_SFLOAT,
 			},
 			shaders = {
 				{
@@ -179,15 +189,50 @@ main :: proc() {
 	}
 	defer unload_scene(&ren, &scene)
 
+	_, transform_add_ok := resource_pool_add_transform(
+		&ren.resource_pool,
+		&ren,
+		linalg.matrix4_scale_f32({10, 10, 10}),
+	)
+	if !transform_add_ok {
+		log.errorf("Could not add transform")
+		return
+	}
+
+	camera_position := linalg.Vector3f32{0, 0, -8}
+	camera_rotation := linalg.Vector2f32{0, 0}
+	camera_rotation_y_bounds := f32(80.0)
+	camera_speed := f32(10.0)
+	camera_sensitivity := f32(0.2)
+
+	keys: #sparse[sdl.Scancode]bool
+	mouse_buttons: [Mouse_Button]bool
+	scroll: [2]f32
+	mouse_delta: [2]f32
+
+	start_time := time.now()
+	delta := f32(0.0)
+
+	mouse_grabbed := false
+
 	running := true
 	is_fullscreen := false
 	for running {
+		defer {
+			diff := time.diff(start_time, time.now())
+			delta = f32(time.duration_seconds(diff))
+			start_time = time.now()
+
+			mouse_delta = {}
+		}
+
 		free_all(context.temp_allocator)
 		for ev: sdl.Event; sdl.PollEvent(&ev); {
 			#partial switch ev.type {
 			case .QUIT:
 				running = false
 			case .KEYDOWN:
+				keys[ev.key.keysym.scancode] = true
 				if ev.key.keysym.sym == .F {
 					sdl.SetWindowFullscreen(
 						window,
@@ -195,6 +240,8 @@ main :: proc() {
 					)
 					is_fullscreen = !is_fullscreen
 				}
+			case .KEYUP:
+				keys[ev.key.keysym.scancode] = false
 			case .WINDOWEVENT:
 				#partial switch ev.window.event {
 				case .RESIZED:
@@ -202,13 +249,88 @@ main :: proc() {
 					h := ev.window.data2
 
 					renderer_resize(&ren, {w, h})
+				case .FOCUS_LOST:
+					keys = {}
 				}
+			case .MOUSEBUTTONDOWN:
+				mouse_buttons[Mouse_Button(ev.button.button)] = true
+			case .MOUSEBUTTONUP:
+				mouse_buttons[Mouse_Button(ev.button.button)] = false
+			case .MOUSEWHEEL:
+				scroll[0] = f32(ev.wheel.x)
+				scroll[1] = f32(ev.wheel.y)
+			case .MOUSEMOTION:
+				mouse_delta[0] = f32(ev.motion.xrel)
+				mouse_delta[1] = f32(ev.motion.yrel)
 			}
 		}
 		cmd := begin_rendering(&ren) or_break
 		defer end_rendering(&ren)
 
 		frame := get_render_frame(&ren)
+
+		// if mouse right down, capture mouse, if not then release
+		if mouse_buttons[.Right] {
+			if !mouse_grabbed {
+				sdl.SetRelativeMouseMode(true)
+				mouse_grabbed = true
+			}
+		} else {
+			if mouse_grabbed {
+				sdl.SetRelativeMouseMode(false)
+				mouse_grabbed = false
+			}
+		}
+
+		camera_projection := linalg.matrix4_perspective_f32(
+			45 * math.PI / 180.0,
+			f32(ren.window_size.x) / f32(ren.window_size.y),
+			0.1,
+			1000.0,
+		)
+
+		if mouse_buttons[.Right] {
+			camera_rotation.x -= mouse_delta.x * camera_sensitivity
+			if camera_rotation.x >= 360.0 do camera_rotation.x -= 360.0
+			if camera_rotation.x < 0.0 do camera_rotation.x += 360.0
+			camera_rotation.y += mouse_delta.y * camera_sensitivity
+			camera_rotation.y = math.clamp(
+				camera_rotation.y,
+				-camera_rotation_y_bounds,
+				camera_rotation_y_bounds,
+			)
+		}
+		x_quat := linalg.quaternion_angle_axis_f32(
+			math.to_radians_f32(camera_rotation.x),
+			{0, 1, 0},
+		)
+		y_quat := linalg.quaternion_angle_axis_f32(
+			math.to_radians_f32(camera_rotation.y),
+			{1, 0, 0},
+		)
+		camera_quat_rotation := x_quat * y_quat
+
+		forward := linalg.quaternion128_mul_vector3(
+			camera_quat_rotation,
+			linalg.Vector3f32{0, 0, 1},
+		)
+		right := linalg.quaternion128_mul_vector3(camera_quat_rotation, linalg.Vector3f32{1, 0, 0})
+		up := linalg.Vector3f32{0, 1, 0}
+
+		speed_adjusted := camera_speed * delta * (0.35 if keys[.LSHIFT] else 1)
+
+		if keys[.W] do camera_position += forward * speed_adjusted
+		if keys[.S] do camera_position -= forward * speed_adjusted
+		if keys[.D] do camera_position -= right * speed_adjusted
+		if keys[.A] do camera_position += right * speed_adjusted
+		if keys[.Q] do camera_position -= up * speed_adjusted
+		if keys[.E] do camera_position += up * speed_adjusted
+
+		camera_view := linalg.matrix4_look_at_f32(camera_position, camera_position + forward, up)
+
+		ren.resource_pool.draws.view = camera_view
+		ren.resource_pool.draws.projection = camera_projection
+		copy_draw_data(&ren.resource_pool)
 
 		tex_barrier(
 			&ren,
@@ -223,7 +345,10 @@ main :: proc() {
 			},
 		)
 
-		ren.instance->cmd_begin_rendering(cmd, {colors = {frame.srv}})
+		ren.instance->cmd_begin_rendering(
+			cmd,
+			{colors = {frame.srv}, depth_stencil = ren.depth_stencil.dsv},
+		)
 		defer ren.instance->cmd_end_rendering(cmd)
 
 		ren.instance->cmd_clear_attachments(
@@ -236,6 +361,7 @@ main :: proc() {
 					planes = {.Color},
 					color_attachment_index = 0,
 				},
+				{value = mercury.Depth_Stencil{depth = 1.0, stencil = 0}, planes = {.Depth}},
 			},
 			{{x = 0, y = 0, width = u16(ren.window_size.x), height = u16(ren.window_size.y)}},
 		)

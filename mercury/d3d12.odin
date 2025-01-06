@@ -1056,12 +1056,13 @@ cmd_set_vertex_buffers :: proc(
 	assert(b.pipeline != nil, "Pipeline must be set before setting vertex buffers")
 	for buffer, i in buffers {
 		if buffer != nil {
+			offset := offsets[i] if len(offsets) > 0 else 0
 			buf: ^D3D12_Buffer = (^D3D12_Buffer)(buffer)
 			small_array.append(
 				&vertex_buffer_views,
 				d3d12.VERTEX_BUFFER_VIEW {
-					BufferLocation = buf.resource->GetGPUVirtualAddress() + offsets[base_slot],
-					SizeInBytes = win32.UINT(buf.desc.size - offsets[base_slot]),
+					BufferLocation = buf.resource->GetGPUVirtualAddress() + offset,
+					SizeInBytes = win32.UINT(buf.desc.size - offset),
 					StrideInBytes = b.pipeline.ia_strides[base_slot + u32(i)],
 				},
 			)
@@ -3974,12 +3975,15 @@ create_texture :: proc(
 
 	format_info := FORMAT_PROPS[desc.format]
 	block_width := format_info.block_width
+	block_height := format_info.block_height
 
 	resource_desc: d3d12.RESOURCE_DESC
 	resource_desc.Dimension = TEXTURE_TYPE_TO_RESOURCE_DIMENSION[desc.type]
-	resource_desc.Width = u64(mem.align_forward_uint(uint(desc.width), uint(block_width)))
+	resource_desc.Width = u64(
+		uint(desc.width) if block_width == 0 else mem.align_forward_uint(uint(desc.width), uint(block_width)),
+	)
 	resource_desc.Height = u32(
-		mem.align_forward_uint(uint(desc.height), uint(format_info.block_height)),
+		uint(desc.height) if block_height == 0 else mem.align_forward_uint(uint(desc.height), uint(block_height)),
 	)
 	resource_desc.DepthOrArraySize = desc.depth if desc.type == ._3D else desc.layer_num
 	resource_desc.MipLevels = u16(desc.mip_num)

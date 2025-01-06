@@ -32,6 +32,8 @@ Renderer :: struct {
 	frame_index:      u64,
 	frames:           small_array.Small_Array(FRAME_BUF_NUM, Frame),
 	backbuffer_index: int,
+	depth_desc:       mercury.Texture_Desc,
+	depth_stencil:    Texture,
 	// transfer
 	transfer:         struct {
 		in_progress:  bool,
@@ -82,6 +84,16 @@ init_renderer :: proc(ren: ^Renderer) -> (ok: bool) {
 	sys_info: sdl.SysWMinfo
 	sdl.GetWindowWMInfo(ren.window, &sys_info)
 
+	// inits the transfer
+	ren.transfer.queue, gpu_err = ren.instance->create_command_queue(ren.device, .Graphics)
+	check_gpu(gpu_err, "Could not create transfer queue") or_return
+	ren.transfer.allocator, gpu_err = ren.instance->create_command_allocator(ren.transfer.queue)
+	check_gpu(gpu_err, "Could not create transfer allocator") or_return
+	ren.transfer.buffer, gpu_err = ren.instance->create_command_buffer(ren.transfer.allocator)
+	check_gpu(gpu_err, "Could not create transfer buffer") or_return
+	ren.transfer.fence, gpu_err = ren.instance->create_fence(ren.device, ren.transfer.fence_value)
+	check_gpu(gpu_err, "Could not create transfer fence") or_return
+
 	ren.swapchain, gpu_err =
 	ren.instance->create_swapchain(
 		ren.device,
@@ -111,16 +123,6 @@ init_renderer :: proc(ren: ^Renderer) -> (ok: bool) {
 		check_gpu(gpu_err, "Could not create frame command buffer {}", index) or_return
 		ren.instance->set_command_buffer_debug_name(frame.cmd, "Frame buffer")
 	}
-
-	// inits the transfer
-	ren.transfer.queue, gpu_err = ren.instance->create_command_queue(ren.device, .Graphics)
-	check_gpu(gpu_err, "Could not create transfer queue") or_return
-	ren.transfer.allocator, gpu_err = ren.instance->create_command_allocator(ren.transfer.queue)
-	check_gpu(gpu_err, "Could not create transfer allocator") or_return
-	ren.transfer.buffer, gpu_err = ren.instance->create_command_buffer(ren.transfer.allocator)
-	check_gpu(gpu_err, "Could not create transfer buffer") or_return
-	ren.transfer.fence, gpu_err = ren.instance->create_fence(ren.device, ren.transfer.fence_value)
-	check_gpu(gpu_err, "Could not create transfer fence") or_return
 
 	// descriptor pool
 	ren.descriptor_pool, gpu_err =
@@ -160,6 +162,10 @@ renderer_cleanup_swapchain_resources :: proc(ren: ^Renderer) {
 			frame.texture = nil
 		}
 	}
+
+	if ren.depth_stencil.texture != nil {
+		destroy_texture(&ren.depth_stencil, ren)
+	}
 }
 
 renderer_acquire_swapchain_resources :: proc(ren: ^Renderer) {
@@ -178,6 +184,35 @@ renderer_acquire_swapchain_resources :: proc(ren: ^Renderer) {
 		check_gpu(gpu_err, "Could not create srv for swapchain texture {}", index)
 		ren.frames.data[index].texture = texture
 	}
+
+	ren.depth_desc = {
+		type      = ._2D,
+		format    = .D32_SFLOAT,
+		usage     = {.Depth_Stencil_Attachment, .Shader_Resource},
+		width     = u16(ren.window_size.x),
+		height    = u16(ren.window_size.y),
+		layer_num = 1,
+		mip_num   = 1,
+	}
+	ren.depth_stencil.desc = ren.depth_desc
+	init_texture(&ren.depth_stencil, ren)
+	cmd := begin_transfer(ren)
+	defer {
+		val := end_transfer(ren)
+		wait_transfer(ren, val)
+	}
+	ren.instance->cmd_barrier(
+		cmd,
+		{
+			textures = {
+				{
+					texture = ren.depth_stencil.texture,
+					after = mercury.ACCESS_LAYOUT_STAGE_DEPTH_STENCIL_ATTACHMENT_WRITE,
+				},
+			},
+		},
+	)
+	texture_set_name(&ren.depth_stencil, "depth stencil", ren)
 }
 
 destroy_renderer :: proc(ren: ^Renderer) {

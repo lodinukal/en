@@ -262,7 +262,11 @@ load_gltf_file :: proc(
 		log.infof("Loaded buffer: {}", buffer.name)
 	}
 
-	temp_buffer_views := make(map[gltf2.Integer]Buffer_View, context.temp_allocator)
+	temp_buffer_views := make(
+		[]Buffer_View,
+		len(data.buffer_views),
+		allocator = context.temp_allocator,
+	)
 	for buf_view, buf_view_i in data.buffer_views {
 		temp_buffer_views[u32(buf_view_i)] = {
 			buffer = uint(buf_view.buffer),
@@ -306,21 +310,6 @@ load_gltf_file :: proc(
 		}
 		log.infof("Loaded mesh: {}", mesh.name)
 	}
-
-	// vertex_count := 0
-	// index_count := 0
-	// for mesh, mesh_i in data.meshes {
-	// 	for prim, prim_i in mesh.primitives {
-
-	// 	}
-	// }
-
-	// for it := gltf2.buf_iter_make([3]f32, &data.accessors[0], data);
-	//     it.idx < it.count;
-	//     it.idx += 1 {
-	// 	elem := gltf2.buf_iter_elem(&it)
-	// 	log.infof("elem: {}", elem)
-	// }
 
 	return
 }

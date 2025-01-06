@@ -34,25 +34,18 @@ Texture2D textures[] : register(t3, space1);
 [shader("vertex")]
 VertexStageOutput vs_main(Vertex input)
 {
+    float4x4 world = transforms[transform_index].transform;
+    world = mul(mul(projection, view), world);
+
+    float4 position = float4(input.position, 1.0);
+    position = mul(world, position);
 
     VertexStageOutput output;
-    output.sv_position = float4(input.position, 1.0);
+    output.sv_position = position;
     output.normal = input.normal;
     output.texcoord = input.texcoord;
+    output.transform_id = transform_index;
     output.material_id = material_index;
-
-    // float4x4 world = transforms[transform_index].transform;
-    // world = mul(mul(projection, view), world);
-
-    // float4 position = float4(input.position, 1.0);
-    // position = mul(world, position);
-
-    // VertexStageOutput output;
-    // output.sv_position = position;
-    // output.normal = input.normal;
-    // output.texcoord = input.texcoord;
-    // output.transform_id = transform_index;
-    // output.material_id = material_index;
 
     return output;
 };
