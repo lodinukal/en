@@ -4,6 +4,7 @@ package mercury
 
 import "base:runtime"
 import "core:container/small_array"
+import "core:fmt"
 import "core:log"
 import "core:mem"
 import "core:strings"
@@ -156,7 +157,7 @@ create_d3d12_instance :: proc(
 	instance.resize_swapchain = resize_swapchain
 
 	instance.create_texture = create_texture
-	instance.destroy_texture = destroy_texture
+	instance.deinit_ren_texture = deinit_ren_texture
 	instance.set_texture_debug_name = set_texture_debug_name
 	instance.get_texture_desc = get_texture_desc
 
@@ -165,10 +166,22 @@ create_d3d12_instance :: proc(
 		if win32.SUCCEEDED(
 			d3d12.GetDebugInterface(d3d12.IDebug_UUID, (^rawptr)(&debug_controller)),
 		) {
-			debug_controller->EnableDebugLayer()
 			defer debug_controller->Release()
+			debug_controller->EnableDebugLayer()
 		} else {
 			log.errorf("Could not enable debug layer")
+		}
+
+		dred_settings: ^d3d12.IDeviceRemovedExtendedDataSettings1
+		if win32.SUCCEEDED(
+			d3d12.GetDebugInterface(
+				d3d12.IDeviceRemovedExtendedDataSettings1_UUID,
+				(^rawptr)(&dred_settings),
+			),
+		) {
+			defer dred_settings->Release()
+			dred_settings->SetAutoBreadcrumbsEnablement(.FORCED_ON)
+			dred_settings->SetPageFaultEnablement(.FORCED_ON)
 		}
 	}
 
@@ -432,17 +445,22 @@ get_staging_descriptor_cpu_pointer :: proc(
 }
 
 D3D12_Device :: struct {
-	using _:               Device,
-	desc:                  Device_Desc,
-	device:                ^d3d12.IDevice5,
-	allocator:             ^d3d12ma.Allocator,
-	adapter:               ^dxgi.IAdapter1,
-	queues:                [Command_Queue_Type]^Command_Queue,
-	staging_heap_counts:   [d3d12.DESCRIPTOR_HEAP_TYPE]u32,
-	heaps:                 [dynamic]D3D12_Staging_Heap,
-	free_descriptors:      [d3d12.DESCRIPTOR_HEAP_TYPE][dynamic]D3D12_CPU_Descriptor_Handle,
+	using _:                   Device,
+	desc:                      Device_Desc,
+	device:                    ^d3d12.IDevice5,
+	allocator:                 ^d3d12ma.Allocator,
+	adapter:                   ^dxgi.IAdapter1,
+	queues:                    [Command_Queue_Type]^Command_Queue,
+	staging_heap_counts:       [d3d12.DESCRIPTOR_HEAP_TYPE]u32,
+	heaps:                     [dynamic]D3D12_Staging_Heap,
+	free_descriptors:          [d3d12.DESCRIPTOR_HEAP_TYPE][dynamic]D3D12_CPU_Descriptor_Handle,
 	//
-	indirect_dispatch_sig: ^d3d12.ICommandSignature,
+	indirect_dispatch_sig:     ^d3d12.ICommandSignature,
+	//
+	device_removed_event:      win32.HANDLE,
+	device_removed_fence:      ^d3d12.IFence,
+	device_remove_wait_handle: win32.HANDLE,
+	ctx:                       runtime.Context,
 }
 
 create_device :: proc(
@@ -548,7 +566,36 @@ create_device :: proc(
 		} else {
 			log.errorf("Could not create info queue")
 		}
+
+		device.device_removed_event = win32.CreateEventW(nil, false, false, nil)
+		if device.device_removed_event == nil {
+			error = .Unknown
+			log.errorf("Could not create device removed event")
+			return
+		}
+		if !win32.SUCCEEDED(
+			device.device->CreateFence(
+				0,
+				{},
+				d3d12.IFence_UUID,
+				(^rawptr)(&device.device_removed_fence),
+			),
+		) {
+			error = .Unknown
+			log.errorf("Could not create device removed fence")
+			return
+		}
+		device.device_removed_fence->SetEventOnCompletion(max(u64), device.device_removed_event)
+		// win32.RegisterWaitForSingleObject(
+		// 	&device.device_remove_wait_handle,
+		// 	device.device_removed_event,
+		// 	auto_cast device_remove_handler,
+		// 	device,
+		// 	win32.INFINITE,
+		// 	0,
+		// )
 	}
+	device.ctx = context
 
 	// create allocator
 	allocator_desc: d3d12ma.ALLOCATOR_DESC
@@ -1179,7 +1226,7 @@ cmd_set_constants :: proc(instance: ^Instance, cmd: ^Command_Buffer, index: u32,
 	b: ^D3D12_Command_Buffer = (^D3D12_Command_Buffer)(cmd)
 
 	root_param_index := u32(b.pipeline_layout.base_root_constant) + index
-	root_constant_num := len(data) / 4
+	root_constant_num := len(data)
 
 	if b.is_graphics {
 		b.list->SetGraphicsRoot32BitConstants(
@@ -2718,15 +2765,13 @@ update_descriptor_ranges :: proc(
 	p: ^D3D12_Descriptor_Pool = ds.pool
 	d3d12_ranges := small_array.slice(&ds.ranges)
 	for range, i in ranges {
-		d3d12_range := d3d12_ranges[int(base_range) + i]
-		offset := range.base_descriptor + d3d12_range.heap_offset
+		set := int(base_range) + i
+		d3d12_range := d3d12_ranges[set]
+		// offset := range.base_descriptor + d3d12_range.heap_offset
 
 		for descriptor_index in 0 ..< len(range.descriptors) {
-			dst := get_cpu_pointer_from_descriptor_pool(
-				p,
-				d3d12_range.heap_type,
-				offset + u32(descriptor_index),
-			)
+			offsetted_index := range.base_descriptor + u32(descriptor_index)
+			dst := get_descriptor_set_cpu_pointer(ds, u32(set), offsetted_index)
 			descriptor := (^D3D12_Descriptor)(range.descriptors[descriptor_index])
 			assert(descriptor != nil, "passed descriptor is nil")
 			src := descriptor.cpu_descriptor
@@ -3018,7 +3063,6 @@ create_graphics_pipeline :: proc(
 			attr.d3d_semantic,
 			allocator = context.temp_allocator,
 		)
-		log.infof("semantic: {}", attr.d3d_semantic)
 		element.SemanticName = semantic_name
 		element.SemanticIndex = 0
 		element.Format = EN_TO_DXGI_FORMAT_TYPED[attr.format]
@@ -3443,6 +3487,7 @@ set_pipeline_layout_debug_name :: proc(
 
 D3D12_Swapchain :: struct {
 	using _:       Swapchain,
+	device:        ^D3D12_Device,
 	swap_chain:    ^dxgi.ISwapChain3,
 	desc:          Swapchain_Desc,
 	textures:      small_array.Small_Array(MAX_SWAPCHAIN_TEXTURES, ^Texture),
@@ -3467,7 +3512,7 @@ create_swapchain :: proc(
 	error: Error,
 ) {
 	i: ^D3D12_Instance = (^D3D12_Instance)(instance)
-	// d: ^D3D12_Device = (^D3D12_Device)(device)
+	d: ^D3D12_Device = (^D3D12_Device)(device)
 	queue: ^D3D12_Command_Queue = (^D3D12_Command_Queue)(desc.command_queue)
 
 	if queue == nil {
@@ -3481,6 +3526,7 @@ create_swapchain :: proc(
 		return
 	}
 	swapchain.desc = desc
+	swapchain.device = d
 
 	tearing_support: win32.BOOL = false
 	hr := i.factory->CheckFeatureSupport(
@@ -3571,7 +3617,7 @@ acquire_swapchain_textures :: proc(
 release_swapchain_textures :: proc(instance: ^D3D12_Instance, swapchain: ^D3D12_Swapchain) {
 	s: ^D3D12_Swapchain = swapchain
 	for texture in small_array.slice(&s.textures) {
-		instance->destroy_texture(texture)
+		instance->deinit_ren_texture(texture)
 	}
 }
 
@@ -3612,10 +3658,88 @@ acquire_next_texture :: proc(instance: ^Instance, swapchain: ^Swapchain) -> u32 
 	return s.swap_chain->GetCurrentBackBufferIndex()
 }
 
+device_remove_handler :: proc "system" (device: ^D3D12_Device, _: win32.BOOLEAN) {
+	context = device.ctx
+
+	// remove_reason := device.device->GetDeviceRemovedReason()
+	// log.infof("Device removed: {}", remove_reason)
+	// if remove_reason == win32.S_OK {
+	// 	return
+	// }
+
+	dred: ^d3d12.IDeviceRemovedExtendedData
+	if !win32.SUCCEEDED(
+		device.device->QueryInterface(d3d12.IDeviceRemovedExtendedData_UUID, (^rawptr)(&dred)),
+	) {
+		log.error("Failed to query device removed extended data")
+		return
+	}
+
+	auto_breadcrumbs_output: d3d12.DRED_AUTO_BREADCRUMBS_OUTPUT
+	page_fault_output: d3d12.DRED_PAGE_FAULT_OUTPUT
+	if !win32.SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&auto_breadcrumbs_output)) {
+		log.error("Failed to get auto breadcrumbs output")
+	}
+	if !win32.SUCCEEDED(dred->GetPageFaultAllocationOutput(&page_fault_output)) {
+		log.error("Failed to get page fault allocation output")
+	}
+
+	err_sb := strings.builder_make_none(context.temp_allocator)
+
+	// https://github.com/RavEngine/RGL/blob/a400f1a8a1628f76434d02a89d782ae5a9086d6b/src/RGLD3D12Common.cpp#L246
+	for node := auto_breadcrumbs_output.pHeadAutoBreadcrumbNode; node != nil; node = node.pNext {
+		node_name :=
+			node.pCommandListDebugNameA if node.pCommandListDebugNameA != nil else "[Unnamed CommandList]"
+		command_queue_name :=
+			node.pCommandQueueDebugNameA if node.pCommandQueueDebugNameA != nil else "[Unnamed CommandQueue]"
+
+		fmt.sbprintfln(
+			&err_sb,
+			"DRED Breadcrumb Data ({} items):\n\tCommand List:\t{}\n\tCommand Queue:\t{}",
+			node.pLastBreadcrumbValue^,
+			node_name,
+			command_queue_name,
+		)
+		command_history: [^]d3d12.AUTO_BREADCRUMB_OP = auto_cast node.pCommandHistory
+		for command, i in command_history[:node.BreadcrumbCount + 1] {
+			is_fail := node.pLastBreadcrumbValue^ == u32(i)
+			fmt.sbprintfln(&err_sb, "\t\t{}{}", command, "  << failed" if is_fail else "")
+		}
+	}
+
+	fmt.sbprintfln(
+		&err_sb,
+		"DRED Page fault:\n\tVirual Addres: 0x%x",
+		page_fault_output.PageFaultVA,
+	)
+	for node := page_fault_output.pHeadExistingAllocationNode; node != nil; node = node.pNext {
+		fmt.sbprintfln(
+			&err_sb,
+			"\tExisting Allocation: %s\n\t\tCommand List: %v",
+			node.ObjectNameA if node.ObjectNameA != nil else "[Unnamed Object]",
+			node.AllocationType,
+		)
+	}
+
+	for node := page_fault_output.pHeadRecentFreedAllocationNode; node != nil; node = node.pNext {
+		fmt.sbprintfln(
+			&err_sb,
+			"\tRecent Freed Allocation: %s\n\t\tCommand List: %v",
+			node.ObjectNameA if node.ObjectNameA != nil else "[Unnamed Object]",
+			node.AllocationType,
+		)
+	}
+
+	log.errorf("Device removed: {}", strings.to_string(err_sb))
+}
+
 present :: proc(instance: ^Instance, swapchain: ^Swapchain) -> (error: Error) {
 	s: ^D3D12_Swapchain = (^D3D12_Swapchain)(swapchain)
 	hr := s.swap_chain->Present(s.sync_interval, s.present_flags)
-	if !win32.SUCCEEDED(hr) {
+	if hr == dxgi.ERROR_DEVICE_REMOVED {
+		device_remove_handler((^D3D12_Device)(s.device), false)
+		error = .Device_Removed
+	} else if !win32.SUCCEEDED(hr) {
 		log.errorf("Failed to present swapchain %d", hr)
 		error = .Unknown
 	}
@@ -3997,13 +4121,24 @@ create_texture :: proc(
 	alloc_info.Flags = {.STRATEGY_MIN_MEMORY}
 	alloc_info.ExtraHeapFlags = {.CREATE_NOT_ZEROED}
 
+	optimised_clear_value: d3d12.CLEAR_VALUE
+	set_clear_value := true
+	optimised_clear_value.Format = EN_TO_DXGI_FORMAT_TYPED[desc.format]
+	if .Depth_Stencil_Attachment in desc.usage {
+		optimised_clear_value.DepthStencil = {
+			Depth   = 1.0,
+			Stencil = 0,
+		}
+	} else if .Color_Attachment in desc.usage {
+		optimised_clear_value.Color = {0.0, 0.0, 0.0, 0.0}
+	} else do set_clear_value = false
 
 	hr := d3d12ma.Allocator_CreateResource(
 		d.allocator,
 		alloc_info,
 		resource_desc,
 		{},
-		{},
+		&optimised_clear_value if set_clear_value else nil,
 		&texture.allocation,
 		d3d12.IResource_UUID,
 		(^rawptr)(&texture.resource),
@@ -4068,7 +4203,7 @@ texture_from_resource :: proc(resource: ^d3d12.IResource) -> ^Texture {
 	return t
 }
 
-destroy_texture :: proc(instance: ^Instance, texture: ^Texture) {
+deinit_ren_texture :: proc(instance: ^Instance, texture: ^Texture) {
 	t: ^D3D12_Texture = (^D3D12_Texture)(texture)
 	if t.allocation != nil {
 		d3d12ma.Allocation_Release(t.allocation)

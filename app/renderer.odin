@@ -164,7 +164,7 @@ renderer_cleanup_swapchain_resources :: proc(ren: ^Renderer) {
 	}
 
 	if ren.depth_stencil.texture != nil {
-		destroy_texture(&ren.depth_stencil, ren)
+		deinit_ren_texture(&ren.depth_stencil, ren)
 	}
 }
 
@@ -195,7 +195,7 @@ renderer_acquire_swapchain_resources :: proc(ren: ^Renderer) {
 		mip_num   = 1,
 	}
 	ren.depth_stencil.desc = ren.depth_desc
-	init_texture(&ren.depth_stencil, ren)
+	init_ren_texture(&ren.depth_stencil, ren)
 	cmd := begin_transfer(ren)
 	defer {
 		val := end_transfer(ren)
@@ -212,7 +212,7 @@ renderer_acquire_swapchain_resources :: proc(ren: ^Renderer) {
 			},
 		},
 	)
-	texture_set_name(&ren.depth_stencil, "depth stencil", ren)
+	ren_texture_set_name(&ren.depth_stencil, "depth stencil", ren)
 }
 
 destroy_renderer :: proc(ren: ^Renderer) {
@@ -231,7 +231,7 @@ destroy_renderer :: proc(ren: ^Renderer) {
 	ren.instance->destroy_command_allocator(ren.transfer.allocator)
 	ren.instance->destroy_command_queue(ren.transfer.queue)
 	for &buffer in ren.transfer.free_buffers {
-		destroy_resizable_buffer(&buffer, ren)
+		deinit_ren_buffer(&buffer, ren)
 	}
 	delete(ren.transfer.free_buffers)
 
@@ -284,6 +284,7 @@ begin_rendering :: proc(ren: ^Renderer) -> (cmd: ^mercury.Command_Buffer, ok: bo
 	return
 }
 // rendering logic between begin_rendering and end_rendering
+// end rendering will return false if it can no longer present the swapchain, aka crash 
 end_rendering :: proc(ren: ^Renderer) -> (ok: bool = true) {
 	frame := small_array.get(ren.frames, int(ren.frame_index % FRAME_BUF_NUM))
 	check_gpu(
@@ -362,11 +363,11 @@ acquire_eph_buffer :: proc(ren: ^Renderer, size: u64) -> (buf: Resizable_Buffer)
 		new_buffer := Resizable_Buffer{}
 		new_buffer.desc.size = max(size, UPLOAD_PAGE_SIZE)
 		new_buffer.desc.location = .Device_Upload
-		if check_gpu(init_resizable_buffer(&new_buffer, ren), "Could not init resizable buffer") ==
+		if check_gpu(init_ren_buffer(&new_buffer, ren), "Could not init resizable buffer") ==
 		   false {
 			return
 		}
-		buffer_set_name(&new_buffer, "ephemeral buffer", ren)
+		ren_buffer_set_name(&new_buffer, "ephemeral buffer", ren)
 		append(&ren.transfer.free_buffers, new_buffer)
 	}
 
@@ -379,7 +380,7 @@ return_eph_buffer :: proc(ren: ^Renderer, buf: Resizable_Buffer) {
 	buf := buf
 	buf.len = 0
 	if len(ren.transfer.free_buffers) >= KEEP_BUFFER_COUNT {
-		destroy_resizable_buffer(&buf, ren)
+		deinit_ren_buffer(&buf, ren)
 		return
 	}
 	append(&ren.transfer.free_buffers, buf)
@@ -410,19 +411,14 @@ Resizable_Buffer :: struct {
 	name:   string,
 }
 
-init_resizable_buffer :: proc(
-	buffer: ^Resizable_Buffer,
-	renderer: ^Renderer,
-) -> (
-	error: mercury.Error,
-) {
+init_ren_buffer :: proc(buffer: ^Resizable_Buffer, renderer: ^Renderer) -> (error: mercury.Error) {
 	old_size := buffer.desc.size
 	buffer.desc.size = 0
-	resize_buffer(buffer, old_size, renderer) or_return
+	ren_buffer_resize(buffer, old_size, renderer) or_return
 	return
 }
 
-destroy_resizable_buffer :: proc(buffer: ^Resizable_Buffer, renderer: ^Renderer) {
+deinit_ren_buffer :: proc(buffer: ^Resizable_Buffer, renderer: ^Renderer) {
 	if buffer.buffer != nil {
 		renderer.instance->destroy_buffer(buffer.buffer)
 	}
@@ -438,7 +434,21 @@ destroy_resizable_buffer :: proc(buffer: ^Resizable_Buffer, renderer: ^Renderer)
 	buffer^ = {}
 }
 
-resize_buffer :: proc(
+ren_buffer_ensure_unsed :: proc(
+	buffer: ^Resizable_Buffer,
+	size: u64,
+	renderer: ^Renderer,
+) -> (
+	error: mercury.Error,
+) {
+	unused := buffer.desc.size - buffer.len
+	if unused < size {
+		ren_buffer_resize(buffer, buffer.len + size - unused, renderer) or_return
+	}
+	return
+}
+
+ren_buffer_resize :: proc(
 	buffer: ^Resizable_Buffer,
 	new_size: u64,
 	renderer: ^Renderer,
@@ -510,7 +520,7 @@ resize_buffer :: proc(
 	return
 }
 
-append_buffer :: proc(
+ren_buffer_append :: proc(
 	buffer: ^Resizable_Buffer,
 	data: []u8,
 	new_stage: mercury.Access_Stage,
@@ -519,31 +529,18 @@ append_buffer :: proc(
 ) -> (
 	error: mercury.Error,
 ) {
-	if buffer.buffer == nil {
-		return .Invalid_Parameter
-	}
 	new_size := buffer.len + u64(len(data))
 	if buffer.desc.size < new_size {
-		resize_buffer(buffer, u64(new_size), renderer) or_return
+		ren_buffer_resize(buffer, u64(new_size), renderer) or_return
 	}
 
-	append_assume_buffer(buffer, data, new_stage, renderer, execute)
+	old_len := buffer.len
+	ren_buffer_set(buffer, data, old_len, new_stage, renderer, execute)
+	buffer.len += u64(len(data))
 	return
 }
 
-append_assume_buffer :: proc(
-	buffer: ^Resizable_Buffer,
-	data: []u8,
-	new_stage: mercury.Access_Stage,
-	renderer: ^Renderer,
-	execute: bool = true,
-) {
-	old_len := buffer.len
-	buffer_set(buffer, data, old_len, new_stage, renderer, execute)
-	buffer.len += u64(len(data))
-}
-
-buffer_set :: proc(
+ren_buffer_set :: proc(
 	buffer: ^Resizable_Buffer,
 	data: []u8,
 	offset: u64,
@@ -556,8 +553,8 @@ buffer_set :: proc(
 		eph := acquire_eph_buffer(renderer, u64(len(data)))
 		defer return_eph_buffer(renderer, eph)
 
-		buffer_len_before := buffer.len
-		append_assume_buffer(&eph, data, new_stage, renderer)
+		buffer_len_before := eph.len
+		ren_buffer_append(&eph, data, new_stage, renderer)
 
 		cmd := begin_transfer(renderer)
 		defer {
@@ -602,7 +599,7 @@ buffer_set :: proc(
 	renderer.instance->unmap_buffer(buffer.buffer)
 }
 
-buffer_set_name :: proc(buffer: ^Resizable_Buffer, name: string, renderer: ^Renderer) {
+ren_buffer_set_name :: proc(buffer: ^Resizable_Buffer, name: string, renderer: ^Renderer) {
 	if buffer.buffer != nil {
 		renderer.instance->set_buffer_debug_name(buffer.buffer, name)
 	}
@@ -625,7 +622,7 @@ Texture :: struct {
 	name:    string,
 }
 
-init_texture :: proc(texture: ^Texture, renderer: ^Renderer) -> (error: mercury.Error) {
+init_ren_texture :: proc(texture: ^Texture, renderer: ^Renderer) -> (error: mercury.Error) {
 	texture.texture = renderer.instance->create_texture(renderer.device, texture.desc) or_return
 
 	if .Shader_Resource in texture.desc.usage {
@@ -723,12 +720,12 @@ init_texture :: proc(texture: ^Texture, renderer: ^Renderer) -> (error: mercury.
 		) or_return
 	}
 
-	texture_set_name(texture, texture.name, renderer)
+	ren_texture_set_name(texture, texture.name, renderer)
 
 	return
 }
 
-destroy_texture :: proc(texture: ^Texture, renderer: ^Renderer) {
+deinit_ren_texture :: proc(texture: ^Texture, renderer: ^Renderer) {
 	if texture.srv != nil {
 		renderer.instance->destroy_descriptor(renderer.device, texture.srv)
 	}
@@ -742,12 +739,12 @@ destroy_texture :: proc(texture: ^Texture, renderer: ^Renderer) {
 		renderer.instance->destroy_descriptor(renderer.device, texture.rtv)
 	}
 	if texture.texture != nil {
-		renderer.instance->destroy_texture(texture.texture)
+		renderer.instance->deinit_ren_texture(texture.texture)
 	}
 	texture^ = {}
 }
 
-texture_set_name :: proc(texture: ^Texture, name: string, renderer: ^Renderer) {
+ren_texture_set_name :: proc(texture: ^Texture, name: string, renderer: ^Renderer) {
 	if texture.texture != nil {
 		renderer.instance->set_texture_debug_name(texture.texture, name)
 	}
@@ -773,7 +770,7 @@ Texture_Subresource_Upload_Desc :: struct {
 	slice_pitch: u32,
 }
 
-texture_upload :: proc(
+ren_texture_upload :: proc(
 	texture: ^Texture,
 	renderer: ^Renderer,
 	subresources: []Texture_Subresource_Upload_Desc = {},
@@ -812,7 +809,7 @@ texture_upload :: proc(
 					// offset := uint(slice) * aligned_slice_pitch + uint(row) * aligned_row_pitch
 					data := subresource.slices[slice * subresource.slice_pitch +
 					row * subresource.row_pitch:][:subresource.row_pitch]
-					append_buffer(
+					ren_buffer_append(
 						&eph,
 						data,
 						mercury.ACCESS_STAGE_COPY_DESTINATION,

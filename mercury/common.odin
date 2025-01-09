@@ -10,6 +10,7 @@ Error :: enum {
 	Out_Of_Memory,
 	Invalid_Parameter,
 	Unknown,
+	Device_Removed,
 }
 
 MAX_RANGES_PER_DESCRIPTOR_SET :: 8
@@ -547,7 +548,7 @@ Instance :: struct {
 		texture: ^Texture,
 		error: Error,
 	),
-	destroy_texture:                  proc(instance: ^Instance, texture: ^Texture),
+	deinit_ren_texture:               proc(instance: ^Instance, texture: ^Texture),
 	set_texture_debug_name:           proc(
 		instance: ^Instance,
 		texture: ^Texture,

@@ -936,14 +936,14 @@ buffer_views_parse :: proc(object: json.Object) -> (res: []Buffer_View, err: Err
 	res = make([]Buffer_View, len(views_array))
 
 	for view, idx in views_array {
-		buffer_set, byte_length_set: bool
+		ren_buffer_set, byte_length_set: bool
 
 		for k, v in view.(json.Object) {
 			switch k {
 			case "buffer":
 				// Required
 				res[idx].buffer = Integer(v.(f64))
-				buffer_set = true
+				ren_buffer_set = true
 
 			case "byteLength":
 				// Required
@@ -973,7 +973,7 @@ buffer_views_parse :: proc(object: json.Object) -> (res: []Buffer_View, err: Err
 			}
 		}
 
-		if !buffer_set {
+		if !ren_buffer_set {
 			return res, GLTF_Error {
 				type = .Missing_Required_Parameter,
 				proc_name = #procedure,

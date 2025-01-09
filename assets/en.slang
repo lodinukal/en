@@ -37,7 +37,7 @@ public struct BoundingSphere
     public float radius;
 };
 
-public struct MeshInfo
+public struct Primitive
 {
     public uint vertex_offset;
     public uint vertex_count;

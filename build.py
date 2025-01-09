@@ -175,6 +175,12 @@ class Builder:
             args.append(f"-collection:{name}={path}")
         if self.debug:
             args.append("-debug")
+        else:
+            args.append("-o:aggressive")
+            args.append("-disable-assert")
+            args.append("-no-bounds-check")
+            args.append("-microarch:native")
+
         args.append(f"-target:{self.target()}")
         args.append(f"-out:{self.output}/{self.proj}{self.extension()}")
         args.append(f"-build-mode:{self.mode.name}")

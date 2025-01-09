@@ -8,6 +8,8 @@ for it := buf_iter_make([3]f32, &accesor, data); it.idx < it.count; it.idx += 1 
 */
 package gltf2
 
+import "core:mem"
+
 Buffer_Iterator :: struct($T: typeid) {
 	buf:                []byte,
 	count, idx, stride: Integer,

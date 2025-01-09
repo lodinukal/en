@@ -1,5 +1,6 @@
 package app
 
+import "core:fmt"
 import "core:log"
 import "core:strings"
 import "en:mercury"
@@ -25,12 +26,12 @@ texture_from_data :: proc(
 	texture.desc.width = u16(width)
 	texture.desc.height = u16(height)
 
-	if err := init_texture(&texture, renderer); err != nil {
+	if err := init_ren_texture(&texture, renderer); err != nil {
 		ok = false
 		log.infof("Could not init texture: {}", err)
 		return
 	}
-	texture_set_name(&texture, name, renderer)
+	ren_texture_set_name(&texture, name, renderer)
 
 	subresource: Texture_Subresource_Upload_Desc
 	subresource.slices = data
@@ -41,7 +42,7 @@ texture_from_data :: proc(
 		u32(texture.desc.height),
 	)
 
-	if err := texture_upload(
+	if err := ren_texture_upload(
 		&texture,
 		renderer,
 		{subresource},
@@ -93,46 +94,52 @@ texture_from_file :: proc(
 	return texture_from_data(renderer, data, u16(height), u16(width), file)
 }
 
-Buffer_View :: struct {
-	buffer: uint,
-	offset: u64,
-	size:   u64,
-}
-
-Primitive :: struct {
-	positions: Buffer_View,
-	normals:   Buffer_View,
-	tangents:  Buffer_View,
-	texcoords: Buffer_View,
-	indices:   Buffer_View,
-	material:  Material_Handle,
-}
-
 Scene_Image :: struct {
 	handle:  Image_Handle,
 	texture: Texture,
 }
 
-Mesh :: struct {
-	primitives: [dynamic]Primitive,
-}
-
 Scene :: struct {
 	images:    [dynamic]Scene_Image,
 	materials: [dynamic]Material_Handle,
-	buffers:   [dynamic]Resizable_Buffer,
-	meshes:    [dynamic]Mesh,
+	meshes:    [dynamic][dynamic]Geometry,
 }
 
+init_scene :: proc(scene: ^Scene, renderer: ^Renderer, name := "scene") {
+}
+
+deinit_scene :: proc(scene: ^Scene, renderer: ^Renderer) {
+	for &scene_img in scene.images {
+		resource_pool_remove_texture(&renderer.resource_pool, renderer, scene_img.handle)
+		deinit_ren_texture(&scene_img.texture, renderer)
+	}
+	delete(scene.images)
+
+	for mat in scene.materials {
+		resource_pool_remove_material(&renderer.resource_pool, renderer, mat)
+	}
+	delete(scene.materials)
+
+	for &mesh in scene.meshes {
+		delete(mesh)
+	}
+	delete(scene.meshes)
+}
+
+import "base:runtime"
+
 // ending with .gltf or .glb
-load_gltf_file :: proc(
+// returns a list of meshes with their primitives
+load_gltf_file_into :: proc(
 	renderer: ^Renderer,
 	file: string,
+	scene: ^Scene,
 	allocator := context.allocator,
 ) -> (
-	scene: Scene,
 	ok: bool = true,
 ) {
+	context.logger = runtime.default_logger()
+
 	data, error := gltf2.load_from_file(file, context.temp_allocator)
 	switch err in error {
 	case gltf2.JSON_Error:
@@ -232,108 +239,96 @@ load_gltf_file :: proc(
 		log.infof("Loaded material: {}", mat.name)
 	}
 
-	reserve(&scene.buffers, len(data.buffers))
-	for buffer in data.buffers {
-		info: Resizable_Buffer
-		info.desc.location = .Device
-		info.desc.size = u64(buffer.byte_length)
-		info.desc.usage = {.Vertex_Buffer, .Index_Buffer}
-		data: []u8
-		switch uri in buffer.uri {
-		case string:
-			log.warnf("Could not load buffer: {}", uri)
-			ok = false
-			return
-		case []u8:
-			data = uri
-		}
-		if err := init_resizable_buffer(&info, renderer); err != nil {
-			log.errorf("Could not init buffer: {}", err)
-			ok = false
-			return
-		}
-		append_assume_buffer(&info, data, mercury.ACCESS_STAGE_SHADER_RESOURCE, renderer)
-		_, append_err := append(&scene.buffers, info)
-		if append_err != nil {
-			log.errorf("Could not append buffer: {}", append_err)
-			ok = false
-			return
-		}
-		log.infof("Loaded buffer: {}", buffer.name)
-	}
-
-	temp_buffer_views := make(
-		[]Buffer_View,
-		len(data.buffer_views),
-		allocator = context.temp_allocator,
-	)
-	for buf_view, buf_view_i in data.buffer_views {
-		temp_buffer_views[u32(buf_view_i)] = {
-			buffer = uint(buf_view.buffer),
-			offset = u64(buf_view.byte_offset),
-			size   = u64(buf_view.byte_length),
-		}
+	if reserve_dynamic_array(&scene.meshes, len(scene.meshes) + len(data.meshes)) != nil {
+		log.errorf("Could not reserve memory for meshes")
+		ok = false
+		return
 	}
 
 	for mesh in data.meshes {
-		primitives, append_err := make([dynamic]Primitive, len = 0, cap = len(mesh.primitives))
-		info: Mesh = {
-			primitives = primitives,
-		}
+		mesh_primitives := make([dynamic]Geometry, len(mesh.primitives))
 		for prim_info in mesh.primitives {
 			prim: Primitive
-			if indices, ok_indices := prim_info.indices.(gltf2.Integer); ok_indices {
-				prim.indices = temp_buffer_views[indices]
+			index_accessor := prim_info.indices.(gltf2.Integer)
+			prim.indices = make(
+				[]u16,
+				data.accessors[index_accessor].count,
+				context.temp_allocator,
+			)
+			fmt.printfln("Index count: {}", data.accessors[index_accessor].count)
+			if data.accessors[index_accessor].component_type == .Unsigned_Short {
+				for it := gltf2.buf_iter_make(u16, &data.accessors[index_accessor], data);
+				    it.idx < it.count;
+				    it.idx += 1 {
+					if it.idx == 0 do fmt.printfln("Index u16: {}", gltf2.buf_iter_elem(&it))
+					prim.indices[it.idx] = gltf2.buf_iter_elem(&it)
+				}
+			} else {
+				// assume u32
+				for it := gltf2.buf_iter_make(u32, &data.accessors[index_accessor], data);
+				    it.idx < it.count;
+				    it.idx += 1 {
+					if it.idx == 0 do fmt.printfln("Index u32: {}", gltf2.buf_iter_elem(&it))
+					prim.indices[it.idx] = u16(gltf2.buf_iter_elem(&it))
+				}
 			}
-			if positions, ok_positions := prim_info.attributes["POSITION"]; ok_positions {
-				prim.positions = temp_buffer_views[positions]
+
+			prim.vertices = make(
+				[]Vertex_Default,
+				data.accessors[prim_info.attributes["POSITION"]].count,
+				context.temp_allocator,
+			)
+			if position_accessor, ok_position := prim_info.attributes["POSITION"]; ok_position {
+				fmt.printfln("Position count: {}", data.accessors[position_accessor].count)
+				for it := gltf2.buf_iter_make([3]f32, &data.accessors[position_accessor], data);
+				    it.idx < it.count;
+				    it.idx += 1 {
+					if it.idx == 0 do fmt.printfln("Position: {}", gltf2.buf_iter_elem(&it))
+					prim.vertices[it.idx].position = gltf2.buf_iter_elem(&it)
+				}
 			}
-			if normals, ok_normals := prim_info.attributes["NORMAL"]; ok_normals {
-				prim.normals = temp_buffer_views[normals]
+
+			if normal_accessor, ok_normal := prim_info.attributes["NORMAL"]; ok_normal {
+				fmt.printfln("Normal count: {}", data.accessors[normal_accessor].count)
+				for it := gltf2.buf_iter_make([3]f32, &data.accessors[normal_accessor], data);
+				    it.idx < it.count;
+				    it.idx += 1 {
+					if it.idx == 0 do fmt.printfln("Normal: {}", gltf2.buf_iter_elem(&it))
+					prim.vertices[it.idx].normal = gltf2.buf_iter_elem(&it)
+				}
 			}
-			if tangents, ok_tangents := prim_info.attributes["TANGENT"]; ok_tangents {
-				prim.tangents = temp_buffer_views[tangents]
+
+			if texcoord_accessor, ok_texcoord := prim_info.attributes["TEXCOORD_0"]; ok_texcoord {
+				fmt.printfln("Texcoord count: {}", data.accessors[texcoord_accessor].count)
+				for it := gltf2.buf_iter_make([2]f32, &data.accessors[texcoord_accessor], data);
+				    it.idx < it.count;
+				    it.idx += 1 {
+					if it.idx == 0 do fmt.printfln("Texcoord: {}", gltf2.buf_iter_elem(&it))
+					prim.vertices[it.idx].texcoord = gltf2.buf_iter_elem(&it)
+				}
 			}
-			if texcoords, ok_texcoords := prim_info.attributes["TEXCOORD_0"]; ok_texcoords {
-				prim.texcoords = temp_buffer_views[texcoords]
+
+			loaded: Geometry
+			if handle, ok_handle := resource_pool_add_primitive(
+				&renderer.resource_pool,
+				renderer,
+				prim,
+			); !ok_handle {
+				log.errorf("Could not add primitive to resource pool")
+				ok = false
+				return
+			} else {
+				loaded.handle = handle
 			}
+
 			if material, ok_material := prim_info.material.(gltf2.Integer); ok_material {
-				prim.material = scene.materials[material]
+				loaded.material = scene.materials[uint(material)]
 			}
-			append(&info.primitives, prim)
+
+			append(&mesh_primitives, loaded)
 		}
-		_, append_err = append(&scene.meshes, info)
-		if append_err != nil {
-			log.errorf("Could not append mesh: {}", append_err)
-			ok = false
-			return
-		}
-		log.infof("Loaded mesh: {}", mesh.name)
+		append(&scene.meshes, mesh_primitives)
 	}
 
 	return
-}
-
-unload_scene :: proc(renderer: ^Renderer, scene: ^Scene) {
-	for &scene_img in scene.images {
-		resource_pool_remove_texture(&renderer.resource_pool, renderer, scene_img.handle)
-		destroy_texture(&scene_img.texture, renderer)
-	}
-	delete(scene.images)
-
-	for mat in scene.materials {
-		resource_pool_remove_material(&renderer.resource_pool, renderer, mat)
-	}
-	delete(scene.materials)
-
-	for &buf in scene.buffers {
-		destroy_resizable_buffer(&buf, renderer)
-	}
-	delete(scene.buffers)
-
-	for &mesh in scene.meshes {
-		delete(mesh.primitives)
-	}
-	delete(scene.meshes)
-	// destroy_resizable_buffer(&mesh.buffer, renderer)
 }

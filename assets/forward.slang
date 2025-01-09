@@ -6,7 +6,6 @@ struct VertexStageOutput
     float4 tangent : TANGENT;
     float2 texcoord : TEXCOORD0;
     nointerpolation uint material_id : MATERIAL;
-    nointerpolation uint transform_id : INSTANCE;
     float4 sv_position : SV_POSITION;
 };
 
@@ -17,24 +16,28 @@ struct Vertex
     float2 texcoord : TEXCOORD0;
 };
 
-cbuffer DrawData : register(t0, space0)
+cbuffer DrawData : register(b0, space0)
 {
     column_major float4x4 view;
     column_major float4x4 projection;
-    uint material_index;
-    uint transform_index;
-    uint vertex_offset;
 };
 
-StructuredBuffer<Transform> transforms : register(t0, space1);
+StructuredBuffer<Primitive> primitives : register(t0, space1);
 StructuredBuffer<Material> materials : register(t1, space1);
 SamplerState sampler : register(s2, space1);
 Texture2D textures[] : register(t3, space1);
 
+cbuffer InstanceData : register(b0, space2)
+{
+    column_major float4x4 i_transform;
+    uint i_primitive;
+    uint i_material;
+};
+
 [shader("vertex")]
 VertexStageOutput vs_main(Vertex input)
 {
-    float4x4 world = transforms[transform_index].transform;
+    float4x4 world = i_transform;
     world = mul(mul(projection, view), world);
 
     float4 position = float4(input.position, 1.0);
@@ -44,8 +47,7 @@ VertexStageOutput vs_main(Vertex input)
     output.sv_position = position;
     output.normal = input.normal;
     output.texcoord = input.texcoord;
-    output.transform_id = transform_index;
-    output.material_id = material_index;
+    output.material_id = i_material;
 
     return output;
 };

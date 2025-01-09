@@ -8,6 +8,7 @@ import "core:math"
 import "core:math/linalg"
 @(require) import "core:mem"
 import "core:os"
+import "core:slice"
 import "core:time"
 
 import "en:mercury"
@@ -29,6 +30,7 @@ main :: proc() {
 	context.logger = logger
 
 	track: mem.Tracking_Allocator
+	_ = track
 	when ODIN_DEBUG {
 		mem.tracking_allocator_init(&track, context.allocator)
 		context.allocator = mem.tracking_allocator(&track)
@@ -127,11 +129,13 @@ main :: proc() {
 	forward_pipeline_layout, forward_pipeline_layout_err := ren.instance->create_pipeline_layout(
 		ren.device,
 		{
+			constants = {{size = size_of(Draw_Data), shader_stages = {.Vertex_Shader}}},
 			descriptor_sets = {
 				resource_pool_draws_descriptor_desc(0, {.Vertex_Shader, .Fragment_Shader}),
 				resource_pool_descriptor_desc(1, {.Vertex_Shader, .Fragment_Shader}),
 			},
 			shader_stages = {.Vertex_Shader, .Fragment_Shader},
+			constants_register_space = 2,
 		},
 	)
 	if forward_pipeline_layout_err != nil {
@@ -182,30 +186,63 @@ main :: proc() {
 	defer ren.instance->destroy_pipeline(forward_pipeline)
 	ren.instance->set_pipeline_debug_name(forward_pipeline, "Forward Pipeline")
 
-	scene, scene_ok := load_gltf_file(&ren, "assets/Avocado/Avocado.gltf")
-	if !scene_ok {
+	scene: Scene
+	init_scene(&scene, &ren)
+	defer deinit_scene(&scene, &ren)
+	if scene_ok := load_gltf_file_into(&ren, "assets/Avocado/Avocado.gltf", &scene); !scene_ok {
 		log.errorf("Could not load scene")
 		return
 	}
-	defer unload_scene(&ren, &scene)
 
-	_, transform_add_ok := resource_pool_add_transform(
-		&ren.resource_pool,
-		&ren,
-		linalg.matrix4_scale_f32({10, 10, 10}),
-	)
-	if !transform_add_ok {
-		log.errorf("Could not add transform")
-		return
-	}
+	// transform_0: Instance_Handle
+	// {
+	// 	t, transform_add_ok := resource_pool_add_instance(
+	// 		&ren.resource_pool,
+	// 		&ren,
+	// 		{
+	// 			transform = linalg.matrix4_scale_f32({10, 10, 10}),
+	// 			primitive = scene.meshes[0][0].handle,
+	// 			material = scene.meshes[0][0].material,
+	// 		},
+	// 	)
+	// 	if !transform_add_ok {
+	// 		log.errorf("Could not add transform")
+	// 		return
+	// 	}
+	// 	transform_0 = t
+	// }
+
+	// transform_1: Instance_Handle
+	// {
+	// 	t, transform_add_ok := resource_pool_add_instance(
+	// 		&ren.resource_pool,
+	// 		&ren,
+	// 		{
+	// 			transform = linalg.matrix4_translate_f32({1, 3, 1}) *
+	// 			linalg.matrix4_scale_f32({10, 10, 10}),
+	// 			primitive = scene.meshes[0][0].handle,
+	// 			material = scene.meshes[0][0].material,
+	// 		},
+	// 	)
+	// 	if !transform_add_ok {
+	// 		log.errorf("Could not add transform")
+	// 		return
+	// 	}
+	// 	transform_1 = t
+	// }
 
 	camera_position := linalg.Vector3f32{0, 0, -8}
 	camera_rotation := linalg.Vector2f32{0, 0}
-	camera_rotation_y_bounds := f32(80.0)
+	// camera_rotation_y_bounds := f32(80.0)
 	camera_speed := f32(10.0)
-	camera_sensitivity := f32(0.2)
+	camera_sensitivity := f32(20)
 
 	keys: #sparse[sdl.Scancode]bool
+	keys_frame: #sparse[sdl.Scancode]enum {
+		none,
+		up,
+		down,
+	}
 	mouse_buttons: [Mouse_Button]bool
 	scroll: [2]f32
 	mouse_delta: [2]f32
@@ -214,6 +251,9 @@ main :: proc() {
 	delta := f32(0.0)
 
 	mouse_grabbed := false
+
+	x_size := 50
+	y_size := 60
 
 	running := true
 	is_fullscreen := false
@@ -224,6 +264,7 @@ main :: proc() {
 			start_time = time.now()
 
 			mouse_delta = {}
+			keys_frame = {}
 		}
 
 		free_all(context.temp_allocator)
@@ -240,8 +281,10 @@ main :: proc() {
 					)
 					is_fullscreen = !is_fullscreen
 				}
+				keys_frame[ev.key.keysym.scancode] = .down
 			case .KEYUP:
 				keys[ev.key.keysym.scancode] = false
+				keys_frame[ev.key.keysym.scancode] = .up
 			case .WINDOWEVENT:
 				#partial switch ev.window.event {
 				case .RESIZED:
@@ -265,7 +308,9 @@ main :: proc() {
 			}
 		}
 		cmd := begin_rendering(&ren) or_break
-		defer end_rendering(&ren)
+		defer if end_rendering(&ren) == false {
+			running = false
+		}
 
 		frame := get_render_frame(&ren)
 
@@ -290,15 +335,17 @@ main :: proc() {
 		)
 
 		if mouse_buttons[.Right] {
-			camera_rotation.x -= mouse_delta.x * camera_sensitivity
+			camera_rotation.x -= mouse_delta.x * camera_sensitivity * delta
 			if camera_rotation.x >= 360.0 do camera_rotation.x -= 360.0
 			if camera_rotation.x < 0.0 do camera_rotation.x += 360.0
-			camera_rotation.y += mouse_delta.y * camera_sensitivity
-			camera_rotation.y = math.clamp(
-				camera_rotation.y,
-				-camera_rotation_y_bounds,
-				camera_rotation_y_bounds,
-			)
+			camera_rotation.y += mouse_delta.y * camera_sensitivity * delta
+			if camera_rotation.y >= 360.0 do camera_rotation.y -= 360.0
+			if camera_rotation.y < 0.0 do camera_rotation.y += 360.0
+			// camera_rotation.y = math.clamp(
+			// 	camera_rotation.y,
+			// 	-camera_rotation_y_bounds,
+			// 	camera_rotation_y_bounds,
+			// )
 		}
 		x_quat := linalg.quaternion_angle_axis_f32(
 			math.to_radians_f32(camera_rotation.x),
@@ -393,42 +440,66 @@ main :: proc() {
 
 		ren.instance->cmd_set_pipeline_layout(cmd, forward_pipeline_layout)
 		ren.instance->cmd_set_pipeline(cmd, forward_pipeline)
+		ren.instance->cmd_set_vertex_buffers(cmd, 0, {ren.resource_pool.vertex_buffer.buffer}, {0})
+		ren.instance->cmd_set_index_buffer(cmd, ren.resource_pool.index_buffer.buffer, 0, .Uint16)
 		bind_descriptor_sets(&ren)
-		for mesh in scene.meshes {
-			for prim in mesh.primitives {
-				ren.resource_pool.draws.material_index = prim.material
-				copy_draw_data(&ren.resource_pool)
 
-				position_buffer := scene.buffers[prim.positions.buffer]
-				normal_buffer := scene.buffers[prim.normals.buffer]
-				texcoord_buffer := scene.buffers[prim.texcoords.buffer]
-				ren.instance->cmd_set_vertex_buffers(
-					cmd,
-					0,
-					{position_buffer.buffer, normal_buffer.buffer, texcoord_buffer.buffer},
-					{prim.positions.offset, prim.normals.offset, prim.texcoords.offset},
-				)
+		draw :: proc(
+			ren: ^Renderer,
+			#by_ptr scene: Scene,
+			cmd: ^mercury.Command_Buffer,
+			object: Object_Data,
+		) {
+			object := object
+			constants := slice.reinterpret(
+				[]u32,
+				slice.bytes_from_ptr(&object, size_of(Object_Data)),
+			)
+			ren.instance->cmd_set_constants(cmd, 0, constants)
+			primitive := ren.resource_pool.cpu_primitives[object.primitive]
+			ren.instance->cmd_draw_indexed(
+				cmd,
+				{
+					index_num = u32(primitive.index_count),
+					instance_num = 1,
+					base_index = primitive.index_offset,
+					base_vertex = primitive.vertex_offset,
+					base_instance = 0,
+				},
+			)
+		}
 
-				index_buffer := scene.buffers[prim.indices.buffer]
-				ren.instance->cmd_set_index_buffer(
-					cmd,
-					index_buffer.buffer,
-					prim.indices.offset,
-					.Uint16,
-				)
+		if keys_frame[.R] == .down {
+			x_size += 1
+			log.infof("total: {}", x_size * y_size)
+		}
 
-				ren.instance->cmd_draw_indexed(
+		if keys_frame[.T] == .down {
+			y_size += 1
+			log.infof("total: {}", x_size * y_size)
+		}
+
+		offset := linalg.MATRIX4F32_IDENTITY
+		// draw in grid
+		for i in 0 ..< x_size {
+			for j in 0 ..< y_size {
+				draw(
+					&ren,
+					scene,
 					cmd,
 					{
-						index_num = u32(prim.indices.size / 2),
-						instance_num = 1,
-						base_index = 0,
-						base_vertex = 0,
-						base_instance = 0,
+						transform = linalg.matrix4_translate_f32({f32(i), 0, f32(j)}) *
+						offset *
+						linalg.matrix4_scale_f32({10, 10, 10}),
+						primitive = scene.meshes[0][0].handle,
+						material = scene.materials[0],
 					},
 				)
 			}
 		}
+
+		// draw_primitive(&ren, scene, cmd, 1)
+		// draw_primitive(&ren, scene, cmd, 0)
 
 		// count := 0
 		// for k, v in track.allocation_map do count += 1
