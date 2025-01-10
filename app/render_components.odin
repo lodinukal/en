@@ -6,7 +6,7 @@ import "core:mem"
 import "core:slice"
 import "en:mercury"
 
-Draw_Data :: struct {
+Frame_Constants :: struct {
 	view:       hlsl.float4x4,
 	projection: hlsl.float4x4,
 	padding0:   u64,
@@ -15,16 +15,18 @@ Draw_Data :: struct {
 	padding3:   u64,
 }
 
+Draw_Data :: mercury.Draw_Indexed_Desc
+
 Object_Data :: struct #align (1) {
 	transform: hlsl.float4x4,
-	primitive: Primitive_Handle,
+	geometry:  Geometry_Handle,
 	material:  Material_Handle,
 }
 
 // Transform_Handle :: distinct u32
 // Transform :: struct #align (1) {
 // 	transform: hlsl.float4x4,
-// 	primitive: Primitive_Handle,
+// 	geometry: Geometry_Handle,
 // 	material:  Material_Handle,
 // }
 
@@ -37,26 +39,29 @@ Material :: struct {
 	emissive:           Image_Handle,
 }
 
-Primitive_Handle :: distinct u32
-Gpu_Primitive :: struct {
-	index_count:   u32,
-	index_offset:  u32,
-	vertex_count:  u32,
+Geometry_Handle :: distinct u32
+Gpu_Geometry :: struct {
 	vertex_offset: u32,
+	vertex_count:  u32,
+	index_offset:  u32,
+	index_count:   u32,
 }
-Primitive :: struct {
+Geometry :: struct {
 	vertices: []Vertex_Default,
 	indices:  []u16,
 }
 
-Geometry :: struct {
-	handle:   Primitive_Handle,
+Material_Geometry_Pair :: struct {
+	handle:   Geometry_Handle,
 	material: Material_Handle,
 }
 
-INITIAL_PRIMITIVE_COUNT :: 64
+INITIAL_GEOMETRY_COUNT :: 64
 // INITIAL_INSTANCE_COUNT :: 256
 INITIAL_MATERIAL_COUNT :: 32
+
+DRAW_BATCH_COUNT :: 500_000
+Draw_Batch_Readback :: u32
 
 INITIAL_IMAGE_COUNT :: 64
 MAX_IMAGES :: 1 << 13
@@ -65,19 +70,25 @@ WHITE_IMAGE_HANDLE :: Image_Handle(0)
 BLACK_IMAGE_HANDLE :: Image_Handle(1)
 
 Resource_Pool :: struct {
-	draws:                         Draw_Data,
-	draw_buffer:                   Resizable_Buffer,
-	draw_mapped:                   ^Draw_Data,
+	frame_constants:               Frame_Constants,
+	constant_buffer:               Ren_Buffer,
+	mapped_constants:              ^Frame_Constants,
+	// size is size_of(Draw_Batch_Readback) + DRAW_BATCH_COUNT * size_of(Frame_Constants)
+	draw_argument_buffer:          Ren_Buffer,
+	// size if DRAW_BATCH_COUNT * size_of(Object_Data)
+	draw_objects_buffer:           Ren_Buffer,
+	draw_count:                    u32,
 	//
-	// instance_buffer:               Resizable_Buffer,
+	//
+	// instance_buffer:               Ren_Buffer,
 	// cpu_instances:                 [dynamic]Instance,
 	//
-	primitive_buffer:              Resizable_Buffer,
-	cpu_primitives:                [dynamic]Gpu_Primitive,
-	vertex_buffer:                 Resizable_Buffer,
-	index_buffer:                  Resizable_Buffer,
+	geometry_buffer:               Ren_Buffer,
+	cpu_geometries:                [dynamic]Gpu_Geometry,
+	vertex_buffer:                 Ren_Buffer,
+	index_buffer:                  Ren_Buffer,
 	//
-	material_buffer:               Resizable_Buffer,
+	material_buffer:               Ren_Buffer,
 	free_materials:                [dynamic]uint,
 	sampler:                       ^mercury.Descriptor,
 	white_texture:                 Texture,
@@ -87,6 +98,7 @@ Resource_Pool :: struct {
 	//
 	draw_constants_descriptor_set: ^mercury.Descriptor_Set,
 	resource_descriptor_set:       ^mercury.Descriptor_Set,
+	gpu_draw_descriptor_set:       ^mercury.Descriptor_Set,
 }
 
 init_resource_pool :: proc(pool: ^Resource_Pool, renderer: ^Renderer) -> (ok: bool = true) {
@@ -99,7 +111,7 @@ init_resource_pool :: proc(pool: ^Resource_Pool, renderer: ^Renderer) -> (ok: bo
 
 	if set, error := renderer.instance->allocate_descriptor_set(
 		renderer.descriptor_pool,
-		resource_pool_descriptor_desc(0, {.Vertex_Shader, .Fragment_Shader}),
+		resource_pool_resource_descriptor_desc(0, {.Vertex_Shader, .Fragment_Shader}),
 	); error != nil {
 		log.errorf("Could not allocate descriptor set: {}", error)
 		ok = false
@@ -110,7 +122,7 @@ init_resource_pool :: proc(pool: ^Resource_Pool, renderer: ^Renderer) -> (ok: bo
 
 	if set, error := renderer.instance->allocate_descriptor_set(
 		renderer.descriptor_pool,
-		resource_pool_draws_descriptor_desc(0, {.Vertex_Shader, .Fragment_Shader}),
+		resource_pool_frame_constants_descriptor_desc(0, {.Vertex_Shader, .Fragment_Shader}),
 	); error != nil {
 		log.errorf("Could not allocate descriptor set: {}", error)
 		ok = false
@@ -119,11 +131,22 @@ init_resource_pool :: proc(pool: ^Resource_Pool, renderer: ^Renderer) -> (ok: bo
 		pool.draw_constants_descriptor_set = set
 	}
 
-	pool.draw_buffer.name = "Draw constants"
-	pool.draw_buffer.desc.location = .Host_Upload
-	pool.draw_buffer.desc.usage = {.Constant_Buffer}
-	pool.draw_buffer.desc.size = u64(mem.align_forward_int(size_of(Draw_Data), 256))
-	if error := init_ren_buffer(&pool.draw_buffer, renderer); error != nil {
+	if set, error := renderer.instance->allocate_descriptor_set(
+		renderer.descriptor_pool,
+		resource_pool_draws_descriptor_desc(0, {.Compute_Shader}),
+	); error != nil {
+		log.errorf("Could not allocate descriptor set: {}", error)
+		ok = false
+		return
+	} else {
+		pool.gpu_draw_descriptor_set = set
+	}
+
+	pool.constant_buffer.name = "Draw constants"
+	pool.constant_buffer.desc.location = .Host_Upload
+	pool.constant_buffer.desc.usage = {.Constant_Buffer}
+	pool.constant_buffer.desc.size = u64(mem.align_forward_int(size_of(Frame_Constants), 256))
+	if error := init_ren_buffer(&pool.constant_buffer, renderer); error != nil {
 		log.errorf("Could not create draw constants buffer: {}", error)
 		ok = false
 		return
@@ -132,19 +155,48 @@ init_resource_pool :: proc(pool: ^Resource_Pool, renderer: ^Renderer) -> (ok: bo
 	renderer.instance->update_descriptor_ranges(
 		pool.draw_constants_descriptor_set,
 		0,
-		{{descriptors = {pool.draw_buffer.cbv}}},
+		{{descriptors = {pool.constant_buffer.cbv}}},
 	)
 	mapped, error_map := renderer.instance->map_buffer(
-		pool.draw_buffer.buffer,
+		pool.constant_buffer.buffer,
 		0,
-		size_of(Draw_Data),
+		size_of(Frame_Constants),
 	)
 	if error_map != nil {
 		log.errorf("Could not map draw buffer {}", error_map)
 		ok = false
 		return
 	}
-	pool.draw_mapped = auto_cast raw_data(mapped)
+	pool.mapped_constants = auto_cast raw_data(mapped)
+
+	pool.draw_argument_buffer.name = "Draw Arguments buffer"
+	pool.draw_argument_buffer.desc.location = .Device
+	pool.draw_argument_buffer.desc.usage = {.Argument_Buffer, .Shader_Resource_Storage}
+	pool.draw_argument_buffer.desc.size = u64(
+		mem.align_forward_int(
+			size_of(Draw_Batch_Readback) + DRAW_BATCH_COUNT * size_of(Frame_Constants),
+			256,
+		),
+	)
+	if error_init_draws := init_ren_buffer(&pool.draw_argument_buffer, renderer);
+	   error_init_draws != nil {
+		log.errorf("Could not create draws buffer: {}", error_init_draws)
+		ok = false
+		return
+	}
+
+	pool.draw_objects_buffer.name = "Draw Objects buffer"
+	pool.draw_objects_buffer.desc.location = .Host_Upload
+	pool.draw_objects_buffer.desc.usage = {.Shader_Resource}
+	pool.draw_objects_buffer.desc.size = u64(
+		mem.align_forward_int(DRAW_BATCH_COUNT * size_of(Object_Data), 256),
+	)
+	if error_init_objects := init_ren_buffer(&pool.draw_objects_buffer, renderer);
+	   error_init_objects != nil {
+		log.errorf("Could not create objects buffer: {}", error_init_objects)
+		ok = false
+		return
+	}
 
 	// pool.instance_buffer.name = "Instance buffer"
 	// pool.instance_buffer.desc.location = .Device
@@ -162,17 +214,17 @@ init_resource_pool :: proc(pool: ^Resource_Pool, renderer: ^Renderer) -> (ok: bo
 	// 	return
 	// }
 
-	pool.primitive_buffer.name = "Primitive buffer"
-	pool.primitive_buffer.desc.location = .Device
-	pool.primitive_buffer.desc.usage = {.Shader_Resource}
-	pool.primitive_buffer.desc.structure_stride = size_of(Gpu_Primitive)
-	pool.primitive_buffer.desc.size = size_of(Gpu_Primitive) * INITIAL_PRIMITIVE_COUNT
-	if error_init_primitive := init_ren_buffer(&pool.primitive_buffer, renderer);
-	   error_init_primitive != nil {
+	pool.geometry_buffer.name = "Geometry buffer"
+	pool.geometry_buffer.desc.location = .Device
+	pool.geometry_buffer.desc.usage = {.Shader_Resource}
+	pool.geometry_buffer.desc.structure_stride = size_of(Gpu_Geometry)
+	pool.geometry_buffer.desc.size = size_of(Gpu_Geometry) * INITIAL_GEOMETRY_COUNT
+	if error_init_geometry := init_ren_buffer(&pool.geometry_buffer, renderer);
+	   error_init_geometry != nil {
 		log.errorf(
-			"Could not create primitive buffer with {} primitives: {}",
-			INITIAL_PRIMITIVE_COUNT,
-			error_init_primitive,
+			"Could not create geometry buffer with {} geometrys: {}",
+			INITIAL_GEOMETRY_COUNT,
+			error_init_geometry,
 		)
 		ok = false
 		return
@@ -301,11 +353,20 @@ init_resource_pool :: proc(pool: ^Resource_Pool, renderer: ^Renderer) -> (ok: bo
 	pool.sampler = sampler
 
 	renderer.instance->update_descriptor_ranges(
+		pool.gpu_draw_descriptor_set,
+		0,
+		{
+			{descriptors = {pool.draw_argument_buffer.uav}},
+			{descriptors = {pool.draw_objects_buffer.srv}},
+			{descriptors = {pool.geometry_buffer.srv}},
+		},
+	)
+
+	renderer.instance->update_descriptor_ranges(
 		pool.resource_descriptor_set,
 		0,
 		{
-			// {descriptors = {pool.instance_buffer.srv}},
-			{descriptors = {pool.primitive_buffer.srv}},
+			{descriptors = {pool.draw_objects_buffer.srv}},
 			{descriptors = {pool.material_buffer.srv}},
 			{descriptors = {sampler}},
 			{descriptors = pool.texture_descriptors[:]},
@@ -325,18 +386,20 @@ destroy_resource_pool :: proc(pool: ^Resource_Pool, renderer: ^Renderer) {
 	delete(pool.free_materials)
 	deinit_ren_buffer(&pool.index_buffer, renderer)
 	deinit_ren_buffer(&pool.vertex_buffer, renderer)
-	deinit_ren_buffer(&pool.primitive_buffer, renderer)
-	delete(pool.cpu_primitives)
+	deinit_ren_buffer(&pool.geometry_buffer, renderer)
+	delete(pool.cpu_geometries)
 	// deinit_ren_buffer(&pool.instance_buffer, renderer)
 	// delete(pool.cpu_instances)
-	deinit_ren_buffer(&pool.draw_buffer, renderer)
+	deinit_ren_buffer(&pool.draw_argument_buffer, renderer)
+	deinit_ren_buffer(&pool.draw_objects_buffer, renderer)
+	deinit_ren_buffer(&pool.constant_buffer, renderer)
 }
 
-copy_draw_data :: proc(pool: ^Resource_Pool) {
-	pool.draw_mapped^ = pool.draws
+copy_frame_constants :: proc(pool: ^Resource_Pool) {
+	pool.mapped_constants^ = pool.frame_constants
 }
 
-resource_pool_draws_descriptor_desc :: proc(
+resource_pool_frame_constants_descriptor_desc :: proc(
 	register_space: u32,
 	stages: mercury.Stage_Flags,
 ) -> mercury.Descriptor_Set_Desc {
@@ -349,7 +412,7 @@ resource_pool_draws_descriptor_desc :: proc(
 	}
 }
 
-resource_pool_descriptor_desc :: proc(
+resource_pool_resource_descriptor_desc :: proc(
 	register_space: u32,
 	stages: mercury.Stage_Flags,
 ) -> mercury.Descriptor_Set_Desc {
@@ -367,14 +430,34 @@ resource_pool_descriptor_desc :: proc(
 	}
 }
 
+resource_pool_draws_descriptor_desc :: proc(
+	register_space: u32,
+	stages: mercury.Stage_Flags,
+) -> mercury.Descriptor_Set_Desc {
+	return {
+		register_space = register_space,
+		ranges         = slice.clone(
+			[]mercury.Descriptor_Range_Desc {
+				// draws themselves
+				mercury.buffer_range(0, 1, stages = stages, writable = true),
+				// instances
+				mercury.buffer_range(1, 1, stages = stages),
+				// geometry
+				mercury.buffer_range(2, 1, stages = stages),
+			},
+			context.temp_allocator,
+		),
+	}
+}
+
 resource_pool_add_texture :: proc(
-	pool: ^Resource_Pool,
 	renderer: ^Renderer,
 	texture: ^mercury.Descriptor,
 ) -> (
 	handle: Image_Handle,
 	ok: bool = true,
 ) {
+	pool := &renderer.resource_pool
 	pos: uint = 0
 	pop_ok: bool = false
 	if pos, pop_ok = pop_safe(&pool.free_texture_descriptors); !pop_ok {
@@ -397,15 +480,12 @@ resource_pool_add_texture :: proc(
 }
 
 // removes a texture, sets it to the white texture
-resource_pool_remove_texture :: proc(
-	pool: ^Resource_Pool,
-	renderer: ^Renderer,
-	handle: Image_Handle,
-) {
+resource_pool_remove_texture :: proc(renderer: ^Renderer, handle: Image_Handle) {
 	if handle == WHITE_IMAGE_HANDLE || handle == BLACK_IMAGE_HANDLE {
 		return
 	}
 
+	pool := &renderer.resource_pool
 	append(&pool.free_texture_descriptors, uint(handle))
 	renderer.instance->update_descriptor_ranges(
 		pool.resource_descriptor_set,
@@ -414,7 +494,8 @@ resource_pool_remove_texture :: proc(
 	)
 }
 
-resource_pool_clear_textures :: proc(pool: ^Resource_Pool, renderer: ^Renderer) {
+resource_pool_clear_textures :: proc(renderer: ^Renderer) {
+	pool := &renderer.resource_pool
 	for &d in pool.texture_descriptors {
 		d = nil
 	}
@@ -427,18 +508,28 @@ resource_pool_clear_textures :: proc(pool: ^Resource_Pool, renderer: ^Renderer) 
 }
 
 resource_pool_add_material :: proc(
-	pool: ^Resource_Pool,
 	renderer: ^Renderer,
 	material: Material,
 ) -> (
 	handle: Material_Handle,
 	ok: bool = true,
 ) {
+	pool := &renderer.resource_pool
 	material := material
 	pos: uint = 0
 	pop_ok: bool = false
 	if pos, pop_ok = pop_safe(&pool.free_materials); !pop_ok {
 		pos = uint(pool.material_buffer.len)
+
+		old_srv := pool.material_buffer.srv
+		defer if pool.material_buffer.srv != old_srv {
+			renderer.instance->update_descriptor_ranges(
+				pool.resource_descriptor_set,
+				1, // material range
+				{{descriptors = {pool.material_buffer.srv}}},
+			)
+		}
+
 		err := ren_buffer_append(
 			&pool.material_buffer,
 			slice.bytes_from_ptr(&material, size_of(Material)),
@@ -464,26 +555,24 @@ resource_pool_add_material :: proc(
 	return
 }
 
-resource_pool_remove_material :: proc(
-	pool: ^Resource_Pool,
-	renderer: ^Renderer,
-	handle: Material_Handle,
-) {
+resource_pool_remove_material :: proc(renderer: ^Renderer, handle: Material_Handle) {
+	pool := &renderer.resource_pool
 	append(&pool.free_materials, uint(handle))
 }
 
-resource_pool_clear_materials :: proc(pool: ^Resource_Pool) {
+resource_pool_clear_materials :: proc(renderer: ^Renderer) {
+	pool := &renderer.resource_pool
 	pool.material_buffer.len = 0
 }
 
 resource_pool_set_material :: proc(
-	pool: ^Resource_Pool,
 	renderer: ^Renderer,
 	handle: Material_Handle,
 	material: Material,
 ) -> (
 	ok: bool = true,
 ) {
+	pool := &renderer.resource_pool
 	material := material
 	ren_buffer_set(
 		&pool.material_buffer,
@@ -549,21 +638,21 @@ resource_pool_set_material :: proc(
 // 	return
 // }
 
-resource_pool_add_primitive :: proc(
-	pool: ^Resource_Pool,
+resource_pool_add_geometry :: proc(
 	renderer: ^Renderer,
-	primitive: Primitive,
+	geometry: Geometry,
 ) -> (
-	handle: Primitive_Handle,
+	handle: Geometry_Handle,
 	ok: bool = true,
 ) {
-	primitive := primitive
+	pool := &renderer.resource_pool
+	geometry := geometry
 	vertex_offset := pool.vertex_buffer.len / size_of(Vertex_Default)
 	index_offset := pool.index_buffer.len / size_of(u16)
 
 	if err_vertex := ren_buffer_append(
 		&pool.vertex_buffer,
-		slice.to_bytes(primitive.vertices),
+		slice.to_bytes(geometry.vertices),
 		mercury.ACCESS_STAGE_VERTEX_BUFFER,
 		renderer,
 	); err_vertex != nil {
@@ -573,7 +662,7 @@ resource_pool_add_primitive :: proc(
 	}
 	if err_index := ren_buffer_append(
 		&pool.index_buffer,
-		slice.to_bytes(primitive.indices),
+		slice.to_bytes(geometry.indices),
 		mercury.ACCESS_STAGE_INDEX_BUFFER,
 		renderer,
 	); err_index != nil {
@@ -582,16 +671,25 @@ resource_pool_add_primitive :: proc(
 		return
 	}
 
-	gpu_primitive: Gpu_Primitive
-	gpu_primitive.vertex_count = u32(len(primitive.vertices))
-	gpu_primitive.vertex_offset = u32(vertex_offset)
-	gpu_primitive.index_count = u32(len(primitive.indices))
-	gpu_primitive.index_offset = u32(index_offset)
+	gpu_geometry: Gpu_Geometry
+	gpu_geometry.vertex_count = u32(len(geometry.vertices))
+	gpu_geometry.vertex_offset = u32(vertex_offset)
+	gpu_geometry.index_count = u32(len(geometry.indices))
+	gpu_geometry.index_offset = u32(index_offset)
 
-	len := len(pool.cpu_primitives)
+	olf_srv := pool.geometry_buffer.srv
+	defer if pool.geometry_buffer.srv != olf_srv {
+		renderer.instance->update_descriptor_ranges(
+			pool.gpu_draw_descriptor_set,
+			2, // geometry range
+			{{descriptors = {pool.geometry_buffer.srv}}},
+		)
+	}
+
+	len := len(pool.cpu_geometries)
 	if err := ren_buffer_append(
-		&pool.primitive_buffer,
-		slice.bytes_from_ptr(&gpu_primitive, size_of(Gpu_Primitive)),
+		&pool.geometry_buffer,
+		slice.bytes_from_ptr(&gpu_geometry, size_of(Gpu_Geometry)),
 		mercury.ACCESS_STAGE_SHADER_RESOURCE,
 		renderer,
 	); err != nil {
@@ -599,18 +697,19 @@ resource_pool_add_primitive :: proc(
 		return
 	}
 
-	append(&pool.cpu_primitives, gpu_primitive)
+	append(&pool.cpu_geometries, gpu_geometry)
 
-	handle = Primitive_Handle(len)
-	log.infof("primitive handle: {}", handle)
+	handle = Geometry_Handle(len)
+	log.infof("geometry handle: {}", handle)
 	return
 }
 
-resource_pool_clear_primitives :: proc(pool: ^Resource_Pool) {
+resource_pool_clear_geometries :: proc(renderer: ^Renderer) {
+	pool := &renderer.resource_pool
 	pool.vertex_buffer.len = 0
 	pool.index_buffer.len = 0
-	pool.primitive_buffer.len = 0
-	clear(&pool.cpu_primitives)
+	pool.geometry_buffer.len = 0
+	clear(&pool.cpu_geometries)
 }
 
 // resource_pool_set_mesh :: proc(
@@ -623,7 +722,7 @@ resource_pool_clear_primitives :: proc(pool: ^Resource_Pool) {
 // ) {
 // 	mesh := mesh
 // 	ren_buffer_set(
-// 		&pool.primitive_buffer,
+// 		&pool.geometry_buffer,
 // 		slice.bytes_from_ptr(&mesh, size_of(Mesh)),
 // 		size_of(mesh) * u64(handle),
 // 		mercury.ACCESS_STAGE_SHADER_RESOURCE,
@@ -633,18 +732,82 @@ resource_pool_clear_primitives :: proc(pool: ^Resource_Pool) {
 // 	return
 // }
 
+resource_pool_get_object_count :: proc(renderer: ^Renderer) -> (count: u32) {
+	pool := &renderer.resource_pool
+	return pool.draw_count
+}
+
+resource_pool_reset_objects :: proc(renderer: ^Renderer) {
+	pool := &renderer.resource_pool
+	pool.draw_count = 0
+	pool.draw_objects_buffer.len = 0
+}
+
+Object_Add_Result :: enum {
+	Ok,
+	Full,
+	Other,
+}
+
+resource_pool_add_object :: proc(
+	renderer: ^Renderer,
+	data: ..Object_Data,
+) -> (
+	result: Object_Add_Result,
+) {
+	data := data
+	pool := &renderer.resource_pool
+	if pool.draw_count + u32(len(data)) > DRAW_BATCH_COUNT {
+		return .Full
+	}
+
+	old_srv := pool.draw_objects_buffer.srv
+	old_uav := pool.draw_objects_buffer.uav
+
+	log.infof("data len: {}", len(slice.to_bytes(data)))
+
+	if err := ren_buffer_append(
+		&pool.draw_objects_buffer,
+		slice.to_bytes(data),
+		mercury.ACCESS_STAGE_SHADER_RESOURCE,
+		renderer,
+	); err != nil {
+		log.errorf("Could not append draw: {}", err)
+		return .Other
+	}
+	pool.draw_count += u32(len(data))
+
+	if pool.draw_objects_buffer.srv != old_srv {
+		renderer.instance->update_descriptor_ranges(
+			pool.resource_descriptor_set,
+			0, // instance range
+			{{descriptors = {pool.draw_objects_buffer.srv}}},
+		)
+	}
+
+	if pool.draw_objects_buffer.uav != old_uav {
+		renderer.instance->update_descriptor_ranges(
+			pool.gpu_draw_descriptor_set,
+			1, // instance range
+			{{descriptors = {pool.draw_objects_buffer.uav}}},
+		)
+	}
+
+	return .Ok
+}
+
 render_components_descriptor_requirements: mercury.Descriptor_Pool_Desc : {
-	descriptor_set_max_num = 2,
+	descriptor_set_max_num = 3,
 	constant_buffer_max_num = 1,
 	sampler_max_num = 1,
 	texture_max_num = MAX_IMAGES,
-	buffer_max_num = 3,
+	buffer_max_num = 5,
 }
 
 render_components_resource_requirements: mercury.Resource_Requirements : {
 	sampler_max_num = 1,
 	texture_max_num = MAX_IMAGES,
-	buffer_max_num = 4,
+	buffer_max_num = 5,
 	render_target_max_num = 4,
 	depth_stencil_target_max_num = 4,
 }

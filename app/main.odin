@@ -1,5 +1,6 @@
 package app
 
+import "core:container/small_array"
 import "core:encoding/cbor"
 @(require) import "core:fmt"
 import "core:io"
@@ -71,8 +72,6 @@ main :: proc() {
 	if !init_renderer(&ren) do return
 	defer destroy_renderer(&ren)
 
-	sw: time.Stopwatch
-	time.stopwatch_start(&sw)
 	session: Shader_Context
 	slang_ok := create_shader_context(&session)
 	if !slang_ok {
@@ -81,15 +80,6 @@ main :: proc() {
 	}
 	defer destroy_shader_context(&session)
 
-	time.stopwatch_stop(&sw)
-
-	log.infof(
-		"Session created in {} ms",
-		(time.duration_milliseconds(time.stopwatch_duration(sw))),
-	)
-
-	time.stopwatch_reset(&sw)
-	time.stopwatch_start(&sw)
 	forward_compiled, ok_forward := compile_shader(
 		&session,
 		"assets/forward.slang",
@@ -101,12 +91,18 @@ main :: proc() {
 		return
 	}
 	log_shader(forward_compiled)
-	time.stopwatch_stop(&sw)
 
-	log.infof(
-		"Forward shader compiled in {} ms",
-		(time.duration_milliseconds(time.stopwatch_duration(sw))),
+	draw_dispatch, ok_dispatch := compile_shader(
+		&session,
+		"assets/draw_dispatch.slang",
+		{.Compute_Shader},
+		allocator = context.temp_allocator,
 	)
+	if !ok_dispatch {
+		log.errorf("Could not compile shader")
+		return
+	}
+	log_shader(draw_dispatch)
 
 	encode_cbor_to_file :: proc(name: string, data: $T) {
 		file, err := os.open(name, os.O_RDWR | os.O_CREATE | os.O_TRUNC)
@@ -124,18 +120,22 @@ main :: proc() {
 		}
 	}
 	encode_cbor_to_file("forward.enshader", forward_compiled)
-
+	encode_cbor_to_file("draw_dispatch.enshader", draw_dispatch)
 
 	forward_pipeline_layout, forward_pipeline_layout_err := ren.instance->create_pipeline_layout(
 		ren.device,
 		{
-			constants = {{size = size_of(Draw_Data), shader_stages = {.Vertex_Shader}}},
+			constants = {{size = size_of(Frame_Constants), shader_stages = {.Vertex_Shader}}},
 			descriptor_sets = {
-				resource_pool_draws_descriptor_desc(0, {.Vertex_Shader, .Fragment_Shader}),
-				resource_pool_descriptor_desc(1, {.Vertex_Shader, .Fragment_Shader}),
+				resource_pool_frame_constants_descriptor_desc(
+					0,
+					{.Vertex_Shader, .Fragment_Shader},
+				),
+				resource_pool_resource_descriptor_desc(1, {.Vertex_Shader, .Fragment_Shader}),
 			},
 			shader_stages = {.Vertex_Shader, .Fragment_Shader},
 			constants_register_space = 2,
+			enable_d3d12_draw_parameters_emulation = true,
 		},
 	)
 	if forward_pipeline_layout_err != nil {
@@ -146,6 +146,26 @@ main :: proc() {
 	ren.instance->set_pipeline_layout_debug_name(
 		forward_pipeline_layout,
 		"Forward Pipeline Layout",
+	)
+
+	// has constants for the number of draws to dispatch
+	draw_dispatch_pipeline_layout, draw_dispatch_pipeline_layout_err := ren.instance->create_pipeline_layout(
+		ren.device,
+		{
+			constants_register_space = 1,
+			constants                = {{size = size_of(u32), shader_stages = {.Compute_Shader}}}, // 4 bytes
+			descriptor_sets          = {resource_pool_draws_descriptor_desc(0, {.Compute_Shader})},
+			shader_stages            = {.Compute_Shader},
+		},
+	)
+	if draw_dispatch_pipeline_layout_err != nil {
+		log.errorf("Could not create pipeline layout: {}", draw_dispatch_pipeline_layout_err)
+		return
+	}
+	defer ren.instance->destroy_pipeline_layout(draw_dispatch_pipeline_layout)
+	ren.instance->set_pipeline_layout_debug_name(
+		draw_dispatch_pipeline_layout,
+		"Draw Dispatch Pipeline Layout",
 	)
 
 	forward_pipeline, forward_pipeline_err := ren.instance->create_graphics_pipeline(
@@ -186,13 +206,34 @@ main :: proc() {
 	defer ren.instance->destroy_pipeline(forward_pipeline)
 	ren.instance->set_pipeline_debug_name(forward_pipeline, "Forward Pipeline")
 
+	draw_dispatch_pipeline, draw_dispatch_pipeline_err := ren.instance->create_compute_pipeline(
+		ren.device,
+		{
+			pipeline_layout = draw_dispatch_pipeline_layout,
+			shader = {bytecode = draw_dispatch[.Compute], entry_point_name = "cs_main"},
+		},
+	)
+	if draw_dispatch_pipeline_err != nil {
+		log.errorf("Could not create pipeline: {}", draw_dispatch_pipeline_err)
+		return
+	}
+	defer ren.instance->destroy_pipeline(draw_dispatch_pipeline)
+	ren.instance->set_pipeline_debug_name(draw_dispatch_pipeline, "Draw Dispatch Pipeline")
+
 	scene: Scene
 	init_scene(&scene, &ren)
 	defer deinit_scene(&scene, &ren)
+
+	if scene_ok := load_gltf_file_into(&ren, "assets/Box/Box.gltf", &scene); !scene_ok {
+		log.errorf("Could not load scene")
+		return
+	}
+
 	if scene_ok := load_gltf_file_into(&ren, "assets/Avocado/Avocado.gltf", &scene); !scene_ok {
 		log.errorf("Could not load scene")
 		return
 	}
+
 
 	// transform_0: Instance_Handle
 	// {
@@ -233,9 +274,9 @@ main :: proc() {
 
 	camera_position := linalg.Vector3f32{0, 0, -8}
 	camera_rotation := linalg.Vector2f32{0, 0}
-	// camera_rotation_y_bounds := f32(80.0)
+	camera_rotation_y_bounds := f32(80.0)
 	camera_speed := f32(10.0)
-	camera_sensitivity := f32(20)
+	camera_sensitivity := f32(80)
 
 	keys: #sparse[sdl.Scancode]bool
 	keys_frame: #sparse[sdl.Scancode]enum {
@@ -252,8 +293,30 @@ main :: proc() {
 
 	mouse_grabbed := false
 
-	x_size := 50
-	y_size := 60
+	x_size := 16
+	y_size := 16
+
+	offset := linalg.MATRIX4F32_IDENTITY
+	@(static) objects: small_array.Small_Array(1600, Object_Data)
+	// draw in grid
+	for i in 0 ..< x_size {
+		for j in 0 ..< y_size {
+			small_array.append_elem(
+				&objects,
+				Object_Data {
+					transform = linalg.matrix4_translate_f32({f32(i), 0, f32(j)}) *
+					offset *
+					linalg.matrix4_scale_f32({0.8, 0.8, 0.8}),
+					geometry = scene.meshes[0][0].handle,
+					material = scene.materials[0],
+				},
+			)
+		}
+	}
+	if err := resource_pool_add_object(&ren, ..small_array.slice(&objects)); err != .Ok {
+		log.panicf("Could not add object: {}", err)
+	}
+	small_array.clear(&objects)
 
 	running := true
 	is_fullscreen := false
@@ -265,6 +328,7 @@ main :: proc() {
 
 			mouse_delta = {}
 			keys_frame = {}
+			scroll = {}
 		}
 
 		free_all(context.temp_allocator)
@@ -307,6 +371,7 @@ main :: proc() {
 				mouse_delta[1] = f32(ev.motion.yrel)
 			}
 		}
+
 		cmd := begin_rendering(&ren) or_break
 		defer if end_rendering(&ren) == false {
 			running = false
@@ -339,13 +404,11 @@ main :: proc() {
 			if camera_rotation.x >= 360.0 do camera_rotation.x -= 360.0
 			if camera_rotation.x < 0.0 do camera_rotation.x += 360.0
 			camera_rotation.y += mouse_delta.y * camera_sensitivity * delta
-			if camera_rotation.y >= 360.0 do camera_rotation.y -= 360.0
-			if camera_rotation.y < 0.0 do camera_rotation.y += 360.0
-			// camera_rotation.y = math.clamp(
-			// 	camera_rotation.y,
-			// 	-camera_rotation_y_bounds,
-			// 	camera_rotation_y_bounds,
-			// )
+			camera_rotation.y = clamp(
+				camera_rotation.y,
+				-camera_rotation_y_bounds,
+				camera_rotation_y_bounds,
+			)
 		}
 		x_quat := linalg.quaternion_angle_axis_f32(
 			math.to_radians_f32(camera_rotation.x),
@@ -362,7 +425,7 @@ main :: proc() {
 			linalg.Vector3f32{0, 0, 1},
 		)
 		right := linalg.quaternion128_mul_vector3(camera_quat_rotation, linalg.Vector3f32{1, 0, 0})
-		up := linalg.Vector3f32{0, 1, 0}
+		up := linalg.quaternion128_mul_vector3(camera_quat_rotation, linalg.Vector3f32{0, 1, 0})
 
 		speed_adjusted := camera_speed * delta * (0.35 if keys[.LSHIFT] else 1)
 
@@ -373,11 +436,19 @@ main :: proc() {
 		if keys[.Q] do camera_position -= up * speed_adjusted
 		if keys[.E] do camera_position += up * speed_adjusted
 
-		camera_view := linalg.matrix4_look_at_f32(camera_position, camera_position + forward, up)
+		if scroll.y != 0 {
+			camera_position += forward * scroll.y
+		}
 
-		ren.resource_pool.draws.view = camera_view
-		ren.resource_pool.draws.projection = camera_projection
-		copy_draw_data(&ren.resource_pool)
+		camera_view := linalg.matrix4_look_at_f32(
+			camera_position,
+			camera_position + forward,
+			{0, 1, 0},
+		)
+
+		ren.resource_pool.frame_constants.view = camera_view
+		ren.resource_pool.frame_constants.projection = camera_projection
+		copy_frame_constants(&ren.resource_pool)
 
 		tex_barrier(
 			&ren,
@@ -444,11 +515,47 @@ main :: proc() {
 		ren.instance->cmd_set_index_buffer(cmd, ren.resource_pool.index_buffer.buffer, 0, .Uint16)
 		bind_descriptor_sets(&ren)
 
+		draw_objects :: proc(
+			ren: ^Renderer,
+			draw_dispatch_pipeline_layout: ^mercury.Pipeline_Layout,
+			draw_dispatch_pipeline: ^mercury.Pipeline,
+			cmd: ^mercury.Command_Buffer,
+		) -> bool {
+			{
+				compute_cmd := begin_compute(ren) or_return
+				ren.instance->cmd_set_pipeline_layout(compute_cmd, draw_dispatch_pipeline_layout)
+				ren.instance->cmd_set_pipeline(compute_cmd, draw_dispatch_pipeline)
+				ren.instance->cmd_set_descriptor_set(
+					compute_cmd,
+					0,
+					ren.resource_pool.gpu_draw_descriptor_set,
+				)
+				ren.instance->cmd_set_constants(compute_cmd, 0, {ren.resource_pool.draw_count})
+				ren.instance->cmd_dispatch(compute_cmd, {ren.resource_pool.draw_count, 1, 1})
+				val := end_compute(ren)
+				wait_compute(ren, val) or_return
+			}
+			ren.instance->cmd_draw_indexed_indirect(
+				cmd,
+				buffer = ren.resource_pool.draw_argument_buffer.buffer,
+				offset = size_of(Draw_Batch_Readback),
+				draw_num = ren.resource_pool.draw_count,
+				stride = size_of(mercury.Draw_Indexed_Emulated_Desc),
+				count_buffer = ren.resource_pool.draw_argument_buffer.buffer,
+				count_buffer_offset = 0,
+			)
+			return true
+		}
+		draw_objects(&ren, draw_dispatch_pipeline_layout, draw_dispatch_pipeline, cmd) or_break
+
+		// draw indirect
+
 		draw :: proc(
 			ren: ^Renderer,
 			#by_ptr scene: Scene,
 			cmd: ^mercury.Command_Buffer,
 			object: Object_Data,
+			index: u32,
 		) {
 			object := object
 			constants := slice.reinterpret(
@@ -456,15 +563,15 @@ main :: proc() {
 				slice.bytes_from_ptr(&object, size_of(Object_Data)),
 			)
 			ren.instance->cmd_set_constants(cmd, 0, constants)
-			primitive := ren.resource_pool.cpu_primitives[object.primitive]
+			geom := ren.resource_pool.cpu_geometries[object.geometry]
 			ren.instance->cmd_draw_indexed(
 				cmd,
 				{
-					index_num = u32(primitive.index_count),
+					index_num = u32(geom.index_count),
 					instance_num = 1,
-					base_index = primitive.index_offset,
-					base_vertex = primitive.vertex_offset,
-					base_instance = 0,
+					base_index = geom.index_offset,
+					base_vertex = geom.vertex_offset,
+					base_instance = index,
 				},
 			)
 		}
@@ -479,24 +586,24 @@ main :: proc() {
 			log.infof("total: {}", x_size * y_size)
 		}
 
-		offset := linalg.MATRIX4F32_IDENTITY
 		// draw in grid
-		for i in 0 ..< x_size {
-			for j in 0 ..< y_size {
-				draw(
-					&ren,
-					scene,
-					cmd,
-					{
-						transform = linalg.matrix4_translate_f32({f32(i), 0, f32(j)}) *
-						offset *
-						linalg.matrix4_scale_f32({10, 10, 10}),
-						primitive = scene.meshes[0][0].handle,
-						material = scene.materials[0],
-					},
-				)
-			}
-		}
+		// for i in 0 ..< x_size {
+		// 	for j in 0 ..< y_size {
+		// 		draw(
+		// 			&ren,
+		// 			scene,
+		// 			cmd,
+		// 			{
+		// 				transform = linalg.matrix4_translate_f32({f32(i), 0, f32(j)}) *
+		// 				offset *
+		// 				linalg.matrix4_scale_f32({10, 10, 10}),
+		// 				geometry = scene.meshes[0][0].handle,
+		// 				material = scene.materials[0],
+		// 			},
+		// 			u32(i * y_size + j),
+		// 		)
+		// 	}
+		// }
 
 		// draw_primitive(&ren, scene, cmd, 1)
 		// draw_primitive(&ren, scene, cmd, 0)

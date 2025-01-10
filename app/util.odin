@@ -102,7 +102,7 @@ Scene_Image :: struct {
 Scene :: struct {
 	images:    [dynamic]Scene_Image,
 	materials: [dynamic]Material_Handle,
-	meshes:    [dynamic][dynamic]Geometry,
+	meshes:    [dynamic][dynamic]Material_Geometry_Pair,
 }
 
 init_scene :: proc(scene: ^Scene, renderer: ^Renderer, name := "scene") {
@@ -110,13 +110,13 @@ init_scene :: proc(scene: ^Scene, renderer: ^Renderer, name := "scene") {
 
 deinit_scene :: proc(scene: ^Scene, renderer: ^Renderer) {
 	for &scene_img in scene.images {
-		resource_pool_remove_texture(&renderer.resource_pool, renderer, scene_img.handle)
+		resource_pool_remove_texture(renderer, scene_img.handle)
 		deinit_ren_texture(&scene_img.texture, renderer)
 	}
 	delete(scene.images)
 
 	for mat in scene.materials {
-		resource_pool_remove_material(&renderer.resource_pool, renderer, mat)
+		resource_pool_remove_material(renderer, mat)
 	}
 	delete(scene.materials)
 
@@ -166,11 +166,7 @@ load_gltf_file_into :: proc(
 				ok = false
 				return
 			}
-			img_handle, add_tex_ok := resource_pool_add_texture(
-				&renderer.resource_pool,
-				renderer,
-				tex.srv,
-			)
+			img_handle, add_tex_ok := resource_pool_add_texture(renderer, tex.srv)
 			if !add_tex_ok {
 				log.errorf("Failed to add texture to resource pool")
 				ok = false
@@ -220,11 +216,7 @@ load_gltf_file_into :: proc(
 		case gltf2.Texture_Info:
 			info.emissive = scene.images[temp_texture_mapping[emissive_tex.index]].handle
 		}
-		mat_handle, add_mat_ok := resource_pool_add_material(
-			&renderer.resource_pool,
-			renderer,
-			info,
-		)
+		mat_handle, add_mat_ok := resource_pool_add_material(renderer, info)
 		if !add_mat_ok {
 			log.errorf("Failed to add material to resource pool")
 			ok = false
@@ -246,11 +238,11 @@ load_gltf_file_into :: proc(
 	}
 
 	for mesh in data.meshes {
-		mesh_primitives := make([dynamic]Geometry, len(mesh.primitives))
+		mesh_primitives := make([dynamic]Material_Geometry_Pair, len(mesh.primitives))
 		for prim_info in mesh.primitives {
-			prim: Primitive
+			geom: Geometry
 			index_accessor := prim_info.indices.(gltf2.Integer)
-			prim.indices = make(
+			geom.indices = make(
 				[]u16,
 				data.accessors[index_accessor].count,
 				context.temp_allocator,
@@ -261,7 +253,7 @@ load_gltf_file_into :: proc(
 				    it.idx < it.count;
 				    it.idx += 1 {
 					if it.idx == 0 do fmt.printfln("Index u16: {}", gltf2.buf_iter_elem(&it))
-					prim.indices[it.idx] = gltf2.buf_iter_elem(&it)
+					geom.indices[it.idx] = gltf2.buf_iter_elem(&it)
 				}
 			} else {
 				// assume u32
@@ -269,11 +261,11 @@ load_gltf_file_into :: proc(
 				    it.idx < it.count;
 				    it.idx += 1 {
 					if it.idx == 0 do fmt.printfln("Index u32: {}", gltf2.buf_iter_elem(&it))
-					prim.indices[it.idx] = u16(gltf2.buf_iter_elem(&it))
+					geom.indices[it.idx] = u16(gltf2.buf_iter_elem(&it))
 				}
 			}
 
-			prim.vertices = make(
+			geom.vertices = make(
 				[]Vertex_Default,
 				data.accessors[prim_info.attributes["POSITION"]].count,
 				context.temp_allocator,
@@ -284,7 +276,7 @@ load_gltf_file_into :: proc(
 				    it.idx < it.count;
 				    it.idx += 1 {
 					if it.idx == 0 do fmt.printfln("Position: {}", gltf2.buf_iter_elem(&it))
-					prim.vertices[it.idx].position = gltf2.buf_iter_elem(&it)
+					geom.vertices[it.idx].position = gltf2.buf_iter_elem(&it)
 				}
 			}
 
@@ -294,7 +286,7 @@ load_gltf_file_into :: proc(
 				    it.idx < it.count;
 				    it.idx += 1 {
 					if it.idx == 0 do fmt.printfln("Normal: {}", gltf2.buf_iter_elem(&it))
-					prim.vertices[it.idx].normal = gltf2.buf_iter_elem(&it)
+					geom.vertices[it.idx].normal = gltf2.buf_iter_elem(&it)
 				}
 			}
 
@@ -304,16 +296,12 @@ load_gltf_file_into :: proc(
 				    it.idx < it.count;
 				    it.idx += 1 {
 					if it.idx == 0 do fmt.printfln("Texcoord: {}", gltf2.buf_iter_elem(&it))
-					prim.vertices[it.idx].texcoord = gltf2.buf_iter_elem(&it)
+					geom.vertices[it.idx].texcoord = gltf2.buf_iter_elem(&it)
 				}
 			}
 
-			loaded: Geometry
-			if handle, ok_handle := resource_pool_add_primitive(
-				&renderer.resource_pool,
-				renderer,
-				prim,
-			); !ok_handle {
+			loaded: Material_Geometry_Pair
+			if handle, ok_handle := resource_pool_add_geometry(renderer, geom); !ok_handle {
 				log.errorf("Could not add primitive to resource pool")
 				ok = false
 				return

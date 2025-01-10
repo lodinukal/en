@@ -42,7 +42,15 @@ Renderer :: struct {
 		buffer:       ^mercury.Command_Buffer,
 		fence:        ^mercury.Fence,
 		fence_value:  u64,
-		free_buffers: [dynamic]Resizable_Buffer,
+		free_buffers: [dynamic]Ren_Buffer,
+	},
+	compute:          struct {
+		in_progress: bool,
+		queue:       ^mercury.Command_Queue,
+		allocator:   ^mercury.Command_Allocator,
+		buffer:      ^mercury.Command_Buffer,
+		fence:       ^mercury.Fence,
+		fence_value: u64,
 	},
 	// descriptor
 	descriptor_pool:  ^mercury.Descriptor_Pool,
@@ -56,14 +64,14 @@ init_renderer :: proc(ren: ^Renderer) -> (ok: bool) {
 
 	gpu_err: mercury.Error
 
-	ren.instance, gpu_err = mercury.create_instance(.D3D12, true)
+	ren.instance, gpu_err = mercury.create_instance(.D3D12, false)
 	check_gpu(gpu_err, "Could not create instance") or_return
 
 	ren.device, gpu_err =
 	ren.instance->create_device(
 		{
-			enable_validation = true,
-			enable_graphics_api_validation = true,
+			enable_validation = false,
+			enable_graphics_api_validation = false,
 			requirements = render_components_resource_requirements,
 		},
 	)
@@ -78,6 +86,7 @@ init_renderer :: proc(ren: ^Renderer) -> (ok: bool) {
 
 	ren.graphics_queue, gpu_err = ren.instance->get_command_queue(ren.device, .Graphics)
 	check_gpu(gpu_err, "Could not get command queue") or_return
+	ren.instance->set_command_queue_debug_name(ren.graphics_queue, "Graphics queue")
 
 	sdl.GetWindowSize(ren.window, &ren.window_size.x, &ren.window_size.y)
 
@@ -93,6 +102,26 @@ init_renderer :: proc(ren: ^Renderer) -> (ok: bool) {
 	check_gpu(gpu_err, "Could not create transfer buffer") or_return
 	ren.transfer.fence, gpu_err = ren.instance->create_fence(ren.device, ren.transfer.fence_value)
 	check_gpu(gpu_err, "Could not create transfer fence") or_return
+
+	ren.instance->set_command_queue_debug_name(ren.transfer.queue, "Transfer queue")
+	ren.instance->set_command_allocator_debug_name(ren.transfer.allocator, "Transfer allocator")
+	ren.instance->set_command_buffer_debug_name(ren.transfer.buffer, "Transfer buffer")
+	ren.instance->set_fence_debug_name(ren.transfer.fence, "Transfer fence")
+
+	// inits the compute
+	ren.compute.queue, gpu_err = ren.instance->create_command_queue(ren.device, .Compute)
+	check_gpu(gpu_err, "Could not create compute queue") or_return
+	ren.compute.allocator, gpu_err = ren.instance->create_command_allocator(ren.compute.queue)
+	check_gpu(gpu_err, "Could not create compute allocator") or_return
+	ren.compute.buffer, gpu_err = ren.instance->create_command_buffer(ren.compute.allocator)
+	check_gpu(gpu_err, "Could not create compute buffer") or_return
+	ren.compute.fence, gpu_err = ren.instance->create_fence(ren.device, ren.compute.fence_value)
+	check_gpu(gpu_err, "Could not create compute fence") or_return
+
+	ren.instance->set_command_queue_debug_name(ren.compute.queue, "Compute queue")
+	ren.instance->set_command_allocator_debug_name(ren.compute.allocator, "Compute allocator")
+	ren.instance->set_command_buffer_debug_name(ren.compute.buffer, "Compute buffer")
+	ren.instance->set_fence_debug_name(ren.compute.fence, "Compute fence")
 
 	ren.swapchain, gpu_err =
 	ren.instance->create_swapchain(
@@ -117,11 +146,17 @@ init_renderer :: proc(ren: ^Renderer) -> (ok: bool) {
 	for &frame, index in small_array.slice(&ren.frames) {
 		frame.allocator, gpu_err = ren.instance->create_command_allocator(ren.graphics_queue)
 		check_gpu(gpu_err, "Could not create frame command allocator {}", index) or_return
-		ren.instance->set_command_allocator_debug_name(frame.allocator, "Frame allocator")
+		ren.instance->set_command_allocator_debug_name(
+			frame.allocator,
+			fmt.tprintf("Frame command allocator {}", index),
+		)
 
 		frame.cmd, gpu_err = ren.instance->create_command_buffer(frame.allocator)
 		check_gpu(gpu_err, "Could not create frame command buffer {}", index) or_return
-		ren.instance->set_command_buffer_debug_name(frame.cmd, "Frame buffer")
+		ren.instance->set_command_buffer_debug_name(
+			frame.cmd,
+			fmt.tprintf("Frame command buffer {}", index),
+		)
 	}
 
 	// descriptor pool
@@ -196,7 +231,7 @@ renderer_acquire_swapchain_resources :: proc(ren: ^Renderer) {
 	}
 	ren.depth_stencil.desc = ren.depth_desc
 	init_ren_texture(&ren.depth_stencil, ren)
-	cmd := begin_transfer(ren)
+	cmd, _ := begin_transfer(ren)
 	defer {
 		val := end_transfer(ren)
 		wait_transfer(ren, val)
@@ -223,6 +258,13 @@ destroy_renderer :: proc(ren: ^Renderer) {
 
 	// destroy descriptor pool
 	ren.instance->destroy_descriptor_pool(ren.descriptor_pool)
+
+	// destroy compute resources
+	wait_compute(ren, ren.compute.fence_value)
+	ren.instance->destroy_fence(ren.compute.fence)
+	ren.instance->destroy_command_buffer(ren.compute.buffer)
+	ren.instance->destroy_command_allocator(ren.compute.allocator)
+	ren.instance->destroy_command_queue(ren.compute.queue)
 
 	// destroy transfer resources
 	wait_transfer(ren, ren.transfer.fence_value)
@@ -304,12 +346,14 @@ end_rendering :: proc(ren: ^Renderer) -> (ok: bool = true) {
 }
 
 UPLOAD_PAGE_SIZE :: 64 * 1024 * 1024
-begin_transfer :: proc(ren: ^Renderer) -> (buf: ^mercury.Command_Buffer) {
+begin_transfer :: proc(ren: ^Renderer) -> (buf: ^mercury.Command_Buffer, ok: bool = true) {
 	if ren.transfer.in_progress {
 		buf = ren.transfer.buffer
 		return
 	}
 	ren.transfer.in_progress = true
+	wait_transfer(ren, ren.transfer.fence_value) or_return
+	ren.instance->reset_command_allocator(ren.transfer.allocator)
 	ren.instance->begin_command_buffer(ren.transfer.buffer)
 	buf = ren.transfer.buffer
 	return
@@ -341,6 +385,46 @@ wait_transfer :: proc(ren: ^Renderer, value: u64) -> (ok: bool = true) {
 	return check_gpu(err, "Could not wait for fence")
 }
 
+
+begin_compute :: proc(ren: ^Renderer) -> (buf: ^mercury.Command_Buffer, ok: bool = true) {
+	if ren.compute.in_progress {
+		buf = ren.compute.buffer
+		return
+	}
+	ren.compute.in_progress = true
+	wait_compute(ren, ren.compute.fence_value) or_return
+	ren.instance->reset_command_allocator(ren.compute.allocator)
+	ren.instance->begin_command_buffer(ren.compute.buffer)
+	ren.instance->cmd_set_descriptor_pool(ren.compute.buffer, ren.descriptor_pool)
+	buf = ren.compute.buffer
+	return
+}
+
+end_compute :: proc(ren: ^Renderer) -> (wait: u64) {
+	wait = ren.compute.fence_value
+	if !ren.compute.in_progress {
+		return
+	}
+	ren.compute.in_progress = false
+	err := ren.instance->end_command_buffer(ren.compute.buffer)
+	if check_gpu(err, "Could not end command buffer") == false {
+		return
+	}
+	ren.instance->submit(ren.compute.queue, {ren.compute.buffer})
+	ren.compute.fence_value += 1
+	err = ren.instance->signal_fence(ren.compute.queue, ren.compute.fence, ren.compute.fence_value)
+	if check_gpu(err, "Could not signal fence") == false {
+		return
+	}
+	wait = ren.compute.fence_value
+	return
+}
+
+wait_compute :: proc(ren: ^Renderer, value: u64) -> (ok: bool = true) {
+	err := ren.instance->wait_fence_now(ren.compute.fence, value)
+	return check_gpu(err, "Could not wait for fence")
+}
+
 tex_barrier :: proc(ren: ^Renderer, barrier: mercury.Texture_Barrier_Desc) {
 	ren.instance->cmd_barrier(get_frame(ren).cmd, {textures = {barrier}})
 }
@@ -349,7 +433,7 @@ buf_barrier :: proc(ren: ^Renderer, barrier: mercury.Buffer_Barrier_Desc) {
 	ren.instance->cmd_barrier(get_frame(ren).cmd, {buffers = {barrier}})
 }
 
-acquire_eph_buffer :: proc(ren: ^Renderer, size: u64) -> (buf: Resizable_Buffer) {
+acquire_eph_buffer :: proc(ren: ^Renderer, size: u64) -> (buf: Ren_Buffer) {
 	if (size >= UPLOAD_PAGE_SIZE) {
 		#reverse for buffer, index in ren.transfer.free_buffers {
 			if buffer.desc.size >= size {
@@ -360,7 +444,7 @@ acquire_eph_buffer :: proc(ren: ^Renderer, size: u64) -> (buf: Resizable_Buffer)
 	}
 
 	if len(ren.transfer.free_buffers) == 0 || size >= UPLOAD_PAGE_SIZE {
-		new_buffer := Resizable_Buffer{}
+		new_buffer := Ren_Buffer{}
 		new_buffer.desc.size = max(size, UPLOAD_PAGE_SIZE)
 		new_buffer.desc.location = .Device_Upload
 		if check_gpu(init_ren_buffer(&new_buffer, ren), "Could not init resizable buffer") ==
@@ -376,13 +460,13 @@ acquire_eph_buffer :: proc(ren: ^Renderer, size: u64) -> (buf: Resizable_Buffer)
 }
 
 KEEP_BUFFER_COUNT :: 3
-return_eph_buffer :: proc(ren: ^Renderer, buf: Resizable_Buffer) {
+return_eph_buffer :: proc(ren: ^Renderer, buf: Ren_Buffer) {
 	buf := buf
 	buf.len = 0
-	if len(ren.transfer.free_buffers) >= KEEP_BUFFER_COUNT {
-		deinit_ren_buffer(&buf, ren)
-		return
-	}
+	// if len(ren.transfer.free_buffers) >= KEEP_BUFFER_COUNT {
+	// 	deinit_ren_buffer(&buf, ren)
+	// 	return
+	// }
 	append(&ren.transfer.free_buffers, buf)
 }
 
@@ -401,7 +485,7 @@ check_gpu :: proc(
 	return true
 }
 
-Resizable_Buffer :: struct {
+Ren_Buffer :: struct {
 	buffer: ^mercury.Buffer,
 	cbv:    ^mercury.Descriptor,
 	srv:    ^mercury.Descriptor,
@@ -411,14 +495,14 @@ Resizable_Buffer :: struct {
 	name:   string,
 }
 
-init_ren_buffer :: proc(buffer: ^Resizable_Buffer, renderer: ^Renderer) -> (error: mercury.Error) {
+init_ren_buffer :: proc(buffer: ^Ren_Buffer, renderer: ^Renderer) -> (error: mercury.Error) {
 	old_size := buffer.desc.size
 	buffer.desc.size = 0
 	ren_buffer_resize(buffer, old_size, renderer) or_return
 	return
 }
 
-deinit_ren_buffer :: proc(buffer: ^Resizable_Buffer, renderer: ^Renderer) {
+deinit_ren_buffer :: proc(buffer: ^Ren_Buffer, renderer: ^Renderer) {
 	if buffer.buffer != nil {
 		renderer.instance->destroy_buffer(buffer.buffer)
 	}
@@ -435,7 +519,7 @@ deinit_ren_buffer :: proc(buffer: ^Resizable_Buffer, renderer: ^Renderer) {
 }
 
 ren_buffer_ensure_unsed :: proc(
-	buffer: ^Resizable_Buffer,
+	buffer: ^Ren_Buffer,
 	size: u64,
 	renderer: ^Renderer,
 ) -> (
@@ -449,13 +533,15 @@ ren_buffer_ensure_unsed :: proc(
 }
 
 ren_buffer_resize :: proc(
-	buffer: ^Resizable_Buffer,
+	buffer: ^Ren_Buffer,
 	new_size: u64,
 	renderer: ^Renderer,
 ) -> (
 	error: mercury.Error,
 ) {
-	if u64(buffer.desc.size) >= new_size || buffer.desc.size != 0 do return
+	if u64(buffer.desc.size) >= new_size do return
+
+	log.infof("resize from {} to {}", buffer.desc.size, new_size)
 
 	old_size := buffer.desc.size
 	buffer.desc.size = u64(new_size)
@@ -464,7 +550,12 @@ ren_buffer_resize :: proc(
 	// if had one then copy over
 	if buffer.buffer != nil {
 		{
-			cmd := begin_transfer(renderer)
+			cmd, begin_ok := begin_transfer(renderer)
+			if !begin_ok {
+				renderer.instance->destroy_buffer(new_buffer)
+				error = .Unknown
+				return
+			}
 			defer {
 				val := end_transfer(renderer)
 				wait_transfer(renderer, val)
@@ -521,7 +612,7 @@ ren_buffer_resize :: proc(
 }
 
 ren_buffer_append :: proc(
-	buffer: ^Resizable_Buffer,
+	buffer: ^Ren_Buffer,
 	data: []u8,
 	new_stage: mercury.Access_Stage,
 	renderer: ^Renderer,
@@ -541,7 +632,7 @@ ren_buffer_append :: proc(
 }
 
 ren_buffer_set :: proc(
-	buffer: ^Resizable_Buffer,
+	buffer: ^Ren_Buffer,
 	data: []u8,
 	offset: u64,
 	new_stage: mercury.Access_Stage,
@@ -556,7 +647,8 @@ ren_buffer_set :: proc(
 		buffer_len_before := eph.len
 		ren_buffer_append(&eph, data, new_stage, renderer)
 
-		cmd := begin_transfer(renderer)
+		cmd, begin_ok := begin_transfer(renderer)
+		if !begin_ok do return
 		defer {
 			val := end_transfer(renderer)
 			if execute do wait_transfer(renderer, val)
@@ -599,7 +691,7 @@ ren_buffer_set :: proc(
 	renderer.instance->unmap_buffer(buffer.buffer)
 }
 
-ren_buffer_set_name :: proc(buffer: ^Resizable_Buffer, name: string, renderer: ^Renderer) {
+ren_buffer_set_name :: proc(buffer: ^Ren_Buffer, name: string, renderer: ^Renderer) {
 	if buffer.buffer != nil {
 		renderer.instance->set_buffer_debug_name(buffer.buffer, name)
 	}
@@ -828,7 +920,8 @@ ren_texture_upload :: proc(
 			dst_region.layer_offset = mercury.dim(layer)
 			dst_region.mip_offset = mercury.mip(mip)
 
-			cmd := begin_transfer(renderer)
+			cmd, begin_ok := begin_transfer(renderer)
+			if !begin_ok do return .Unknown
 			defer {
 				val := end_transfer(renderer)
 				if execute do wait_transfer(renderer, val)

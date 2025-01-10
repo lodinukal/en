@@ -37,7 +37,7 @@ public struct BoundingSphere
     public float radius;
 };
 
-public struct Primitive
+public struct Geometry
 {
     public uint vertex_offset;
     public uint vertex_count;
@@ -59,26 +59,33 @@ public struct Transform
     public float4x4 transform;
 };
 
+public struct Object
+{
+    public column_major float4x4 transform;
+    public uint geometry;
+    public uint material;
+};
+
 [ForceInline]
-public void set_indexed_indirect_arr<T : IRWArray<uint>>(T arr, uint index, uint index_count_per_instance, uint instance_count, uint base_index, int vertex_offset, uint base_instance)
+public void set_indexed_indirect_arr(RWBuffer<uint> arr, uint index, uint index_count_per_instance, uint instance_count, uint base_index, int vertex_offset, uint base_instance, uint offset)
 {
     __target_switch
     {
     case hlsl:
     case dxil_lib:
-        arr[index * 7 + 0] = vertex_offset;
-        arr[index * 7 + 1] = base_instance;
-        arr[index * 7 + 2] = index_count_per_instance;
-        arr[index * 7 + 3] = instance_count;
-        arr[index * 7 + 4] = base_index;
-        arr[index * 7 + 5] = vertex_offset;
-        arr[index * 7 + 6] = base_instance;
+        arr[offset + index * 7 + 0] = vertex_offset;
+        arr[offset + index * 7 + 1] = base_instance;
+        arr[offset + index * 7 + 2] = index_count_per_instance;
+        arr[offset + index * 7 + 3] = instance_count;
+        arr[offset + index * 7 + 4] = base_index;
+        arr[offset + index * 7 + 5] = vertex_offset;
+        arr[offset + index * 7 + 6] = base_instance;
 
     default:
-        arr[index * 5 + 0] = index_count_per_instance;
-        arr[index * 5 + 1] = instance_count;
-        arr[index * 5 + 2] = base_index;
-        arr[index * 5 + 3] = vertex_offset;
-        arr[index * 5 + 4] = base_instance;
+        arr[offset + index * 5 + 0] = index_count_per_instance;
+        arr[offset + index * 5 + 1] = instance_count;
+        arr[offset + index * 5 + 2] = base_index;
+        arr[offset + index * 5 + 3] = vertex_offset;
+        arr[offset + index * 5 + 4] = base_instance;
     }
 }

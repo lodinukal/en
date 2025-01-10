@@ -8,6 +8,7 @@ for it := buf_iter_make([3]f32, &accesor, data); it.idx < it.count; it.idx += 1 
 */
 package gltf2
 
+import "core:fmt"
 import "core:mem"
 
 Buffer_Iterator :: struct($T: typeid) {
@@ -55,6 +56,8 @@ buf_iter_make :: proc($T: typeid, accessor: ^Accessor, data: ^Data) -> (res: Buf
 	start_byte := accessor.byte_offset + buffer_view.byte_offset
 	end_byte := start_byte + accessor.count * (size_of(T) + res.stride)
 	uri := data.buffers[buffer_view.buffer].uri
+
+	fmt.printfln("size T: {}, stride: {}, count: {}", size_of(T), res.stride, accessor.count)
 
 	// TODO: Add safety check to ensure uri is of type `[]byte`
 	res.buf = uri.([]byte)[start_byte:end_byte]
