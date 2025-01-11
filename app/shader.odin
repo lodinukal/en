@@ -77,7 +77,7 @@ Shader_Context :: struct {
 	session:        ^sp.ISession,
 }
 
-create_shader_context :: proc(ctx: ^Shader_Context) -> (ok: bool = true) {
+create_shader_context :: proc(ctx: ^Shader_Context, debug := true) -> (ok: bool = true) {
 	// attempt to load
 	if slang_lib.__handle == nil {
 		count := dynlib.initialize_symbols(&slang_lib, "slang", "slang_") or_return
@@ -87,7 +87,7 @@ create_shader_context :: proc(ctx: ^Shader_Context) -> (ok: bool = true) {
 		}
 	}
 	slang_check(slang_lib.createGlobalSession(sp.API_VERSION, &ctx.global_session))
-	sm_6_profile := ctx.global_session->findProfile("sm_6_0")
+	sm_6_profile := ctx.global_session->findProfile("sm_6_3")
 	target_dxil_desc := sp.TargetDesc {
 		structureSize = size_of(sp.TargetDesc),
 		format        = .DXIL,
@@ -117,9 +117,16 @@ create_shader_context :: proc(ctx: ^Shader_Context) -> (ok: bool = true) {
 		{name = .VulkanBindShiftAll, value = {intValue0 = 1, intValue1 = 0}},
 		{name = .VulkanBindShiftAll, value = {intValue0 = 2, intValue1 = 0}},
 		{name = .VulkanBindShiftAll, value = {intValue0 = 3, intValue1 = 0}},
+		// {
+		// 	name = .DisableWarning,
+		// 	value = {kind = .String, stringValue0 = "profileImplicitlyUpgraded"},
+		// },
 		{
-			name = .DisableWarning,
-			value = {kind = .String, stringValue0 = "profileImplicitlyUpgraded"},
+			name = .DebugInformation,
+			value = {
+				kind = .Int,
+				intValue0 = auto_cast (sp.DebugInfoLevel.MAXIMAL if debug else sp.DebugInfoLevel.NONE),
+			},
 		},
 	}
 	session_desc := sp.SessionDesc {
@@ -259,7 +266,7 @@ compile_shader :: proc(
 	return
 }
 
-free_shader :: proc(result: [Shader_Stage][]u8, allocator := context.allocator) {
+free_shader :: proc(result: [mercury.Shader_Target][]u8, allocator := context.allocator) {
 	for output in result {
 		if output == nil do continue
 		free(raw_data(output), allocator)

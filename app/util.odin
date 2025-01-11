@@ -110,13 +110,13 @@ init_scene :: proc(scene: ^Scene, renderer: ^Renderer, name := "scene") {
 
 deinit_scene :: proc(scene: ^Scene, renderer: ^Renderer) {
 	for &scene_img in scene.images {
-		resource_pool_remove_texture(renderer, scene_img.handle)
+		ren_remove_texture(renderer, scene_img.handle)
 		deinit_ren_texture(&scene_img.texture, renderer)
 	}
 	delete(scene.images)
 
 	for mat in scene.materials {
-		resource_pool_remove_material(renderer, mat)
+		ren_remove_material(renderer, mat)
 	}
 	delete(scene.materials)
 
@@ -125,8 +125,6 @@ deinit_scene :: proc(scene: ^Scene, renderer: ^Renderer) {
 	}
 	delete(scene.meshes)
 }
-
-import "base:runtime"
 
 // ending with .gltf or .glb
 // returns a list of meshes with their primitives
@@ -138,7 +136,7 @@ load_gltf_file_into :: proc(
 ) -> (
 	ok: bool = true,
 ) {
-	context.logger = runtime.default_logger()
+	// context.logger = runtime.default_logger()
 
 	data, error := gltf2.load_from_file(file, context.temp_allocator)
 	switch err in error {
@@ -166,7 +164,7 @@ load_gltf_file_into :: proc(
 				ok = false
 				return
 			}
-			img_handle, add_tex_ok := resource_pool_add_texture(renderer, tex.srv)
+			img_handle, add_tex_ok := ren_add_texture(renderer, tex.srv)
 			if !add_tex_ok {
 				log.errorf("Failed to add texture to resource pool")
 				ok = false
@@ -178,7 +176,7 @@ load_gltf_file_into :: proc(
 				ok = false
 				return
 			}
-			log.infof("Loaded image: {}", img.name)
+		// log.infof("Loaded image: {}", img.name)
 		}
 	}
 
@@ -187,7 +185,7 @@ load_gltf_file_into :: proc(
 		switch s in tex.source {
 		case gltf2.Integer:
 			temp_texture_mapping[u32(tex_i)] = uint(s)
-			log.infof("Mapping texture: {}", s)
+		// log.infof("Mapping texture: {}", s)
 		case:
 			log.warnf("Could not load texture: {}", s)
 		}
@@ -196,27 +194,32 @@ load_gltf_file_into :: proc(
 	for mat in data.materials {
 		info: Material
 		info.base_color = [4]f32{1.0, 1.0, 1.0, 1.0}
-		#partial switch mr in mat.metallic_roughness {
-		case gltf2.Material_Metallic_Roughness:
-			#partial switch base_color_tex in mr.base_color_texture {
-			case gltf2.Texture_Info:
-				info.albedo = scene.images[temp_texture_mapping[base_color_tex.index]].handle
+		if mr, mr_ok := mat.metallic_roughness.?; mr_ok {
+			info.base_color = mr.base_color_factor
+			if albedo, albedo_ok := mr.base_color_texture.?; albedo_ok {
+				info.albedo = scene.images[temp_texture_mapping[albedo.index]].handle
+			} else {
+				info.albedo = Image_Handle(max(u32))
 			}
-			#partial switch metallic_roughness_tex in mr.metallic_roughness_texture {
-			case gltf2.Texture_Info:
+			if metallic_roughness, metallic_roughness_ok := mr.metallic_roughness_texture.?;
+			   metallic_roughness_ok {
 				info.metallic_roughness =
-					scene.images[temp_texture_mapping[metallic_roughness_tex.index]].handle
+					scene.images[temp_texture_mapping[metallic_roughness.index]].handle
+			} else {
+				info.metallic_roughness = Image_Handle(max(u32))
 			}
 		}
-		#partial switch normal_tex in mat.normal_texture {
-		case gltf2.Material_Normal_Texture_Info:
+		if normal_tex, normal_ok := mat.normal_texture.?; normal_ok {
 			info.normal = scene.images[temp_texture_mapping[normal_tex.index]].handle
+		} else {
+			info.normal = Image_Handle(max(u32))
 		}
-		#partial switch emissive_tex in mat.emissive_texture {
-		case gltf2.Texture_Info:
+		if emissive_tex, emissive_ok := mat.emissive_texture.?; emissive_ok {
 			info.emissive = scene.images[temp_texture_mapping[emissive_tex.index]].handle
+		} else {
+			info.emissive = Image_Handle(max(u32))
 		}
-		mat_handle, add_mat_ok := resource_pool_add_material(renderer, info)
+		mat_handle, add_mat_ok := ren_add_material(renderer, info)
 		if !add_mat_ok {
 			log.errorf("Failed to add material to resource pool")
 			ok = false
@@ -228,7 +231,7 @@ load_gltf_file_into :: proc(
 			ok = false
 			return
 		}
-		log.infof("Loaded material: {}", mat.name)
+		// log.infof("Loaded material: {}", mat.name)
 	}
 
 	if reserve_dynamic_array(&scene.meshes, len(scene.meshes) + len(data.meshes)) != nil {
@@ -301,7 +304,7 @@ load_gltf_file_into :: proc(
 			}
 
 			loaded: Material_Geometry_Pair
-			if handle, ok_handle := resource_pool_add_geometry(renderer, geom); !ok_handle {
+			if handle, ok_handle := ren_add_geometry(renderer, geom); !ok_handle {
 				log.errorf("Could not add primitive to resource pool")
 				ok = false
 				return
@@ -311,6 +314,8 @@ load_gltf_file_into :: proc(
 
 			if material, ok_material := prim_info.material.(gltf2.Integer); ok_material {
 				loaded.material = scene.materials[uint(material)]
+			} else {
+				loaded.material = Material_Handle(max(u32))
 			}
 
 			append(&mesh_primitives, loaded)

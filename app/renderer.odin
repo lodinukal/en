@@ -5,6 +5,7 @@ import "core:container/small_array"
 import "core:fmt"
 import "core:log"
 import "core:mem"
+import "core:slice"
 
 import "en:mercury"
 import sdl "vendor:sdl2"
@@ -43,6 +44,7 @@ Renderer :: struct {
 		fence:        ^mercury.Fence,
 		fence_value:  u64,
 		free_buffers: [dynamic]Ren_Buffer,
+		eph_id:       u64,
 	},
 	compute:          struct {
 		in_progress: bool,
@@ -64,14 +66,14 @@ init_renderer :: proc(ren: ^Renderer) -> (ok: bool) {
 
 	gpu_err: mercury.Error
 
-	ren.instance, gpu_err = mercury.create_instance(.D3D12, false)
+	ren.instance, gpu_err = mercury.create_instance(.D3D12, true)
 	check_gpu(gpu_err, "Could not create instance") or_return
 
 	ren.device, gpu_err =
 	ren.instance->create_device(
 		{
-			enable_validation = false,
-			enable_graphics_api_validation = false,
+			enable_validation = true,
+			enable_graphics_api_validation = true,
 			requirements = render_components_resource_requirements,
 		},
 	)
@@ -231,23 +233,14 @@ renderer_acquire_swapchain_resources :: proc(ren: ^Renderer) {
 	}
 	ren.depth_stencil.desc = ren.depth_desc
 	init_ren_texture(&ren.depth_stencil, ren)
-	cmd, _ := begin_transfer(ren)
-	defer {
-		val := end_transfer(ren)
-		wait_transfer(ren, val)
-	}
-	ren.instance->cmd_barrier(
-		cmd,
-		{
-			textures = {
-				{
-					texture = ren.depth_stencil.texture,
-					after = mercury.ACCESS_LAYOUT_STAGE_DEPTH_STENCIL_ATTACHMENT_WRITE,
-				},
-			},
-		},
-	)
 	ren_texture_set_name(&ren.depth_stencil, "depth stencil", ren)
+	ren_texture_barrier(
+		&ren.depth_stencil,
+		mercury.ACCESS_LAYOUT_STAGE_DEPTH_STENCIL_ATTACHMENT_WRITE,
+		ren,
+	)
+	val := end_transfer(ren)
+	wait_transfer(ren, val)
 }
 
 destroy_renderer :: proc(ren: ^Renderer) {
@@ -299,13 +292,6 @@ get_render_frame :: proc(ren: ^Renderer) -> ^Frame {
 
 get_frame :: proc(ren: ^Renderer) -> ^Frame {
 	return small_array.get_ptr(&ren.frames, int(ren.frame_index % FRAME_BUF_NUM))
-}
-
-bind_descriptor_sets :: proc(ren: ^Renderer) {
-	frame := get_frame(ren)
-	cmd := frame.cmd
-	ren.instance->cmd_set_descriptor_set(cmd, 0, ren.resource_pool.draw_constants_descriptor_set)
-	ren.instance->cmd_set_descriptor_set(cmd, 1, ren.resource_pool.resource_descriptor_set)
 }
 
 begin_rendering :: proc(ren: ^Renderer) -> (cmd: ^mercury.Command_Buffer, ok: bool = true) {
@@ -425,14 +411,6 @@ wait_compute :: proc(ren: ^Renderer, value: u64) -> (ok: bool = true) {
 	return check_gpu(err, "Could not wait for fence")
 }
 
-tex_barrier :: proc(ren: ^Renderer, barrier: mercury.Texture_Barrier_Desc) {
-	ren.instance->cmd_barrier(get_frame(ren).cmd, {textures = {barrier}})
-}
-
-buf_barrier :: proc(ren: ^Renderer, barrier: mercury.Buffer_Barrier_Desc) {
-	ren.instance->cmd_barrier(get_frame(ren).cmd, {buffers = {barrier}})
-}
-
 acquire_eph_buffer :: proc(ren: ^Renderer, size: u64) -> (buf: Ren_Buffer) {
 	if (size >= UPLOAD_PAGE_SIZE) {
 		#reverse for buffer, index in ren.transfer.free_buffers {
@@ -451,7 +429,12 @@ acquire_eph_buffer :: proc(ren: ^Renderer, size: u64) -> (buf: Ren_Buffer) {
 		   false {
 			return
 		}
-		ren_buffer_set_name(&new_buffer, "ephemeral buffer", ren)
+		ren_buffer_set_name(
+			&new_buffer,
+			fmt.tprintf("ephemeral buffer {}", ren.transfer.eph_id),
+			ren,
+		)
+		ren.transfer.eph_id += 1
 		append(&ren.transfer.free_buffers, new_buffer)
 	}
 
@@ -492,28 +475,29 @@ Ren_Buffer :: struct {
 	uav:    ^mercury.Descriptor,
 	desc:   mercury.Buffer_Desc,
 	len:    u64,
+	state:  mercury.Access_Stage,
 	name:   string,
 }
 
-init_ren_buffer :: proc(buffer: ^Ren_Buffer, renderer: ^Renderer) -> (error: mercury.Error) {
+init_ren_buffer :: proc(buffer: ^Ren_Buffer, ren: ^Renderer) -> (error: mercury.Error) {
 	old_size := buffer.desc.size
 	buffer.desc.size = 0
-	ren_buffer_resize(buffer, old_size, renderer) or_return
+	ren_buffer_resize(buffer, old_size, ren) or_return
 	return
 }
 
-deinit_ren_buffer :: proc(buffer: ^Ren_Buffer, renderer: ^Renderer) {
+deinit_ren_buffer :: proc(buffer: ^Ren_Buffer, ren: ^Renderer) {
 	if buffer.buffer != nil {
-		renderer.instance->destroy_buffer(buffer.buffer)
+		ren.instance->destroy_buffer(buffer.buffer)
 	}
 	if buffer.cbv != nil {
-		renderer.instance->destroy_descriptor(renderer.device, buffer.cbv)
+		ren.instance->destroy_descriptor(ren.device, buffer.cbv)
 	}
 	if buffer.srv != nil {
-		renderer.instance->destroy_descriptor(renderer.device, buffer.srv)
+		ren.instance->destroy_descriptor(ren.device, buffer.srv)
 	}
 	if buffer.uav != nil {
-		renderer.instance->destroy_descriptor(renderer.device, buffer.uav)
+		ren.instance->destroy_descriptor(ren.device, buffer.uav)
 	}
 	buffer^ = {}
 }
@@ -521,13 +505,13 @@ deinit_ren_buffer :: proc(buffer: ^Ren_Buffer, renderer: ^Renderer) {
 ren_buffer_ensure_unsed :: proc(
 	buffer: ^Ren_Buffer,
 	size: u64,
-	renderer: ^Renderer,
+	ren: ^Renderer,
 ) -> (
 	error: mercury.Error,
 ) {
 	unused := buffer.desc.size - buffer.len
 	if unused < size {
-		ren_buffer_resize(buffer, buffer.len + size - unused, renderer) or_return
+		ren_buffer_resize(buffer, buffer.len + size - unused, ren) or_return
 	}
 	return
 }
@@ -535,7 +519,7 @@ ren_buffer_ensure_unsed :: proc(
 ren_buffer_resize :: proc(
 	buffer: ^Ren_Buffer,
 	new_size: u64,
-	renderer: ^Renderer,
+	ren: ^Renderer,
 ) -> (
 	error: mercury.Error,
 ) {
@@ -545,35 +529,48 @@ ren_buffer_resize :: proc(
 
 	old_size := buffer.desc.size
 	buffer.desc.size = u64(new_size)
-	new_buffer := renderer.instance->create_buffer(renderer.device, buffer.desc) or_return
+	new_buffer := ren.instance->create_buffer(ren.device, buffer.desc) or_return
+	ren.instance->set_buffer_debug_name(new_buffer, buffer.name)
 
 	// if had one then copy over
 	if buffer.buffer != nil {
 		{
-			cmd, begin_ok := begin_transfer(renderer)
+			cmd, begin_ok := begin_transfer(ren)
 			if !begin_ok {
-				renderer.instance->destroy_buffer(new_buffer)
+				ren.instance->destroy_buffer(new_buffer)
 				error = .Unknown
 				return
 			}
 			defer {
-				val := end_transfer(renderer)
-				wait_transfer(renderer, val)
+				val := end_transfer(ren)
+				wait_transfer(ren, val)
 			}
-			renderer.instance->cmd_copy_buffer(cmd, new_buffer, 0, buffer.buffer, 0, old_size)
+			ren.instance->cmd_barrier(
+				cmd,
+				{
+					buffers = {
+						{
+							buffer = buffer.buffer,
+							before = buffer.state,
+							after = mercury.ACCESS_STAGE_COPY_SOURCE,
+						},
+					},
+				},
+			)
+			ren.instance->cmd_copy_buffer(cmd, new_buffer, 0, buffer.buffer, 0, old_size)
 		}
-		renderer.instance->destroy_buffer(buffer.buffer)
+		ren.instance->destroy_buffer(buffer.buffer)
 	}
 	buffer.buffer = new_buffer
 
 	format: mercury.Format = .UNKNOWN
-	if renderer.instance.api == .D3D12 {
+	if ren.instance.api == .D3D12 {
 		format = .R32_UINT
 	}
 
 	if .Constant_Buffer in buffer.desc.usage {
-		buffer.cbv = renderer.instance->create_buffer_view(
-			renderer.device,
+		buffer.cbv = ren.instance->create_buffer_view(
+			ren.device,
 			{
 				buffer = buffer.buffer,
 				view_type = .Constant,
@@ -581,11 +578,11 @@ ren_buffer_resize :: proc(
 				format = format,
 			},
 		) or_return
-		renderer.instance->set_descriptor_debug_name(buffer.cbv, buffer.name)
+		ren.instance->set_descriptor_debug_name(buffer.cbv, buffer.name)
 	}
 	if .Shader_Resource in buffer.desc.usage {
-		buffer.srv = renderer.instance->create_buffer_view(
-			renderer.device,
+		buffer.srv = ren.instance->create_buffer_view(
+			ren.device,
 			{
 				buffer = buffer.buffer,
 				view_type = .Shader_Resource,
@@ -593,11 +590,11 @@ ren_buffer_resize :: proc(
 				format = format,
 			},
 		) or_return
-		renderer.instance->set_descriptor_debug_name(buffer.srv, buffer.name)
+		ren.instance->set_descriptor_debug_name(buffer.srv, buffer.name)
 	}
 	if .Shader_Resource_Storage in buffer.desc.usage {
-		buffer.uav = renderer.instance->create_buffer_view(
-			renderer.device,
+		buffer.uav = ren.instance->create_buffer_view(
+			ren.device,
 			{
 				buffer = buffer.buffer,
 				view_type = .Shader_Resource_Storage,
@@ -605,9 +602,8 @@ ren_buffer_resize :: proc(
 				format = format,
 			},
 		) or_return
-		renderer.instance->set_descriptor_debug_name(buffer.uav, buffer.name)
+		ren.instance->set_descriptor_debug_name(buffer.uav, buffer.name)
 	}
-	renderer.instance->set_buffer_debug_name(buffer.buffer, buffer.name)
 	return
 }
 
@@ -615,20 +611,38 @@ ren_buffer_append :: proc(
 	buffer: ^Ren_Buffer,
 	data: []u8,
 	new_stage: mercury.Access_Stage,
-	renderer: ^Renderer,
+	ren: ^Renderer,
 	execute: bool = true,
 ) -> (
 	error: mercury.Error,
 ) {
 	new_size := buffer.len + u64(len(data))
 	if buffer.desc.size < new_size {
-		ren_buffer_resize(buffer, u64(new_size), renderer) or_return
+		ren_buffer_resize(buffer, u64(new_size), ren) or_return
 	}
 
 	old_len := buffer.len
-	ren_buffer_set(buffer, data, old_len, new_stage, renderer, execute)
+	ren_buffer_set(buffer, data, old_len, new_stage, ren, execute)
 	buffer.len += u64(len(data))
 	return
+}
+
+ren_buffer_append_typed :: proc(
+	buffer: ^Ren_Buffer,
+	value: $T,
+	new_stage: mercury.Access_Stage,
+	ren: ^Renderer,
+) -> (
+	error: mercury.Error,
+	execute: bool = true,
+) {
+	return ren_buffer_append(
+		buffer,
+		slice.reinterpret([]u8, slice.bytes_from_ptr(&value, size_of(T))),
+		new_stage,
+		ren,
+		execute,
+	)
 }
 
 ren_buffer_set :: proc(
@@ -636,30 +650,28 @@ ren_buffer_set :: proc(
 	data: []u8,
 	offset: u64,
 	new_stage: mercury.Access_Stage,
-	renderer: ^Renderer,
+	ren: ^Renderer,
 	execute: bool = true,
 ) {
 	// requires a transfer op
 	if buffer.desc.location == .Device {
-		eph := acquire_eph_buffer(renderer, u64(len(data)))
-		defer return_eph_buffer(renderer, eph)
+		eph := acquire_eph_buffer(ren, u64(len(data)))
+		defer return_eph_buffer(ren, eph)
 
 		buffer_len_before := eph.len
-		ren_buffer_append(&eph, data, new_stage, renderer)
+		ren_buffer_append(&eph, data, new_stage, ren)
 
-		cmd, begin_ok := begin_transfer(renderer)
+		cmd, begin_ok := begin_transfer(ren)
 		if !begin_ok do return
 		defer {
-			val := end_transfer(renderer)
-			if execute do wait_transfer(renderer, val)
+			val := end_transfer(ren)
+			if execute do wait_transfer(ren, val)
 		}
 
-		renderer.instance->cmd_barrier(
-			cmd,
-			{buffers = {{buffer = buffer.buffer, after = mercury.ACCESS_STAGE_COPY_DESTINATION}}},
-		)
+		ren_buffer_barrier(buffer, mercury.ACCESS_STAGE_COPY_DESTINATION, ren)
+		defer ren_buffer_barrier(buffer, new_stage, ren)
 
-		renderer.instance->cmd_copy_buffer(
+		ren.instance->cmd_copy_buffer(
 			cmd,
 			buffer.buffer,
 			offset,
@@ -667,41 +679,160 @@ ren_buffer_set :: proc(
 			buffer_len_before,
 			u64(len(data)),
 		)
-
-		renderer.instance->cmd_barrier(
-			cmd,
-			{
-				buffers = {
-					{
-						buffer = buffer.buffer,
-						before = mercury.ACCESS_STAGE_COPY_DESTINATION,
-						after = new_stage,
-					},
-				},
-			},
-		)
 		return
 	}
 	assert(offset + u64(len(data)) <= buffer.desc.size, "Buffer overflow")
-	mapped, error := renderer.instance->map_buffer(buffer.buffer, offset, u64(len(data)))
+	mapped, error := ren.instance->map_buffer(buffer.buffer, offset, u64(len(data)))
 	if error != nil {
 		panic("Could not map buffer")
 	}
 	copy_slice(mapped, data)
-	renderer.instance->unmap_buffer(buffer.buffer)
+	ren.instance->unmap_buffer(buffer.buffer)
 }
 
-ren_buffer_set_name :: proc(buffer: ^Ren_Buffer, name: string, renderer: ^Renderer) {
+ren_buffer_set_typed :: proc(
+	buffer: ^Ren_Buffer,
+	value: $T,
+	offset: u64,
+	new_stage: mercury.Access_Stage,
+	ren: ^Renderer,
+) {
+	ren_buffer_set(
+		buffer,
+		slice.reinterpret([]u8, slice.bytes_from_ptr(&value, size_of(T))),
+		offset,
+		new_stage,
+		ren,
+	)
+}
+
+ren_buffer_get :: proc(
+	buffer: ^Ren_Buffer,
+	offset: u64,
+	size: u64,
+	ren: ^Renderer,
+	allocator := context.temp_allocator,
+) -> (
+	data: []u8,
+	error: mercury.Error,
+) {
+	// requires a transfer op
+	if buffer.desc.location == .Device {
+		eph := acquire_eph_buffer(ren, size)
+		defer return_eph_buffer(ren, eph)
+
+		cmd, begin_ok := begin_transfer(ren)
+		if !begin_ok do return
+		defer {
+			val := end_transfer(ren)
+			wait_transfer(ren, val)
+		}
+
+		ren_buffer_barrier(buffer, mercury.ACCESS_STAGE_COPY_SOURCE, ren)
+		defer ren_buffer_barrier(buffer, buffer.state, ren)
+
+		buffer_len_before := eph.len
+		ren.instance->cmd_copy_buffer(
+			cmd,
+			eph.buffer,
+			buffer_len_before,
+			buffer.buffer,
+			offset,
+			size,
+		)
+		return ren_buffer_get(&eph, buffer_len_before, size, ren, allocator)
+	}
+
+	assert(offset + size <= buffer.desc.size, "Buffer overflow")
+	mapped := ren.instance->map_buffer(buffer.buffer, offset, size) or_return
+	defer ren.instance->unmap_buffer(buffer.buffer)
+	if result, alloc_err := slice.clone(mapped, allocator); alloc_err != nil {
+		error = .Out_Of_Memory
+		return
+	} else {
+		data = result
+		return
+	}
+}
+
+ren_buffer_get_typed :: proc(
+	buffer: ^Ren_Buffer,
+	$T: typeid,
+	#any_int offset: u64,
+	ren: ^Renderer,
+) -> (
+	value: T,
+	error: mercury.Error,
+) {
+	data := ren_buffer_get(buffer, offset, size_of(T), ren) or_return
+	if v, ok := slice.to_type(data, T); !ok {
+		error = .Invalid_Parameter
+		return
+	} else {
+		value = v
+	}
+	return
+}
+
+ren_buffer_barrier :: proc(
+	buffer: ^Ren_Buffer,
+	new_stage: mercury.Access_Stage,
+	ren: ^Renderer,
+	execute := false,
+) {
+	cmd, begin_ok := begin_transfer(ren)
+	if !begin_ok {
+		return
+	}
+	if buffer.state.access == new_stage.access && buffer.state.stages == new_stage.stages {return}
+	// log.warnf("barrier({}) {} -> {}", buffer.name, buffer.state, new_stage)
+	ren.instance->cmd_barrier(
+		cmd,
+		{buffers = {{buffer = buffer.buffer, before = buffer.state, after = new_stage}}},
+	)
+	buffer.state = new_stage
+}
+
+ren_buffer_set_name :: proc(buffer: ^Ren_Buffer, name: string, ren: ^Renderer) {
 	if buffer.buffer != nil {
-		renderer.instance->set_buffer_debug_name(buffer.buffer, name)
+		ren.instance->set_buffer_debug_name(buffer.buffer, name)
 	}
 	if buffer.srv != nil {
-		renderer.instance->set_descriptor_debug_name(buffer.srv, name)
+		ren.instance->set_descriptor_debug_name(buffer.srv, name)
 	}
 	if buffer.uav != nil {
-		renderer.instance->set_descriptor_debug_name(buffer.uav, name)
+		ren.instance->set_descriptor_debug_name(buffer.uav, name)
 	}
 	buffer.name = name
+}
+
+ren_buffer_set_vertex :: proc(
+	buffer: ^Ren_Buffer,
+	ren: ^Renderer,
+	cmd: ^mercury.Command_Buffer,
+	slot: u32,
+	offset: u64,
+) {
+	ren.instance->cmd_set_vertex_buffers(cmd, slot, {buffer.buffer}, {offset})
+}
+
+ren_buffer_set_index :: proc(
+	buffer: ^Ren_Buffer,
+	ren: ^Renderer,
+	cmd: ^mercury.Command_Buffer,
+	offset: u64,
+	index_type: mercury.Index_Type,
+) {
+	ren.instance->cmd_set_index_buffer(cmd, buffer.buffer, offset, index_type)
+}
+
+ren_set_constants :: proc(ren: ^Renderer, cmd: ^mercury.Command_Buffer, slot: u32, data: $T) {
+	data := data
+	ren.instance->cmd_set_constants(
+		cmd,
+		slot,
+		slice.reinterpret([]u32, slice.bytes_from_ptr(&data, size_of(T))),
+	)
 }
 
 Texture :: struct {
@@ -711,17 +842,18 @@ Texture :: struct {
 	dsv:     ^mercury.Descriptor,
 	rtv:     ^mercury.Descriptor,
 	desc:    mercury.Texture_Desc,
+	state:   mercury.Access_Layout_Stage,
 	name:    string,
 }
 
-init_ren_texture :: proc(texture: ^Texture, renderer: ^Renderer) -> (error: mercury.Error) {
-	texture.texture = renderer.instance->create_texture(renderer.device, texture.desc) or_return
+init_ren_texture :: proc(texture: ^Texture, ren: ^Renderer) -> (error: mercury.Error) {
+	texture.texture = ren.instance->create_texture(ren.device, texture.desc) or_return
 
 	if .Shader_Resource in texture.desc.usage {
 		switch texture.desc.type {
 		case ._1D:
-			texture.srv = renderer.instance->create_1d_texture_view(
-				renderer.device,
+			texture.srv = ren.instance->create_1d_texture_view(
+				ren.device,
 				{
 					texture = texture.texture,
 					view_type = .Shader_Resource,
@@ -730,8 +862,8 @@ init_ren_texture :: proc(texture: ^Texture, renderer: ^Renderer) -> (error: merc
 				},
 			) or_return
 		case ._2D:
-			texture.srv = renderer.instance->create_2d_texture_view(
-				renderer.device,
+			texture.srv = ren.instance->create_2d_texture_view(
+				ren.device,
 				{
 					texture = texture.texture,
 					view_type = .Shader_Resource,
@@ -741,8 +873,8 @@ init_ren_texture :: proc(texture: ^Texture, renderer: ^Renderer) -> (error: merc
 				},
 			) or_return
 		case ._3D:
-			texture.srv = renderer.instance->create_3d_texture_view(
-				renderer.device,
+			texture.srv = ren.instance->create_3d_texture_view(
+				ren.device,
 				{
 					texture = texture.texture,
 					view_type = .Shader_Resource,
@@ -755,8 +887,8 @@ init_ren_texture :: proc(texture: ^Texture, renderer: ^Renderer) -> (error: merc
 	if .Shader_Resource_Storage in texture.desc.usage {
 		switch texture.desc.type {
 		case ._1D:
-			texture.uav = renderer.instance->create_1d_texture_view(
-				renderer.device,
+			texture.uav = ren.instance->create_1d_texture_view(
+				ren.device,
 				{
 					texture = texture.texture,
 					view_type = .Shader_Resource_Storage,
@@ -765,8 +897,8 @@ init_ren_texture :: proc(texture: ^Texture, renderer: ^Renderer) -> (error: merc
 				},
 			) or_return
 		case ._2D:
-			texture.uav = renderer.instance->create_2d_texture_view(
-				renderer.device,
+			texture.uav = ren.instance->create_2d_texture_view(
+				ren.device,
 				{
 					texture = texture.texture,
 					view_type = .Shader_Resource_Storage,
@@ -776,8 +908,8 @@ init_ren_texture :: proc(texture: ^Texture, renderer: ^Renderer) -> (error: merc
 				},
 			) or_return
 		case ._3D:
-			texture.uav = renderer.instance->create_3d_texture_view(
-				renderer.device,
+			texture.uav = ren.instance->create_3d_texture_view(
+				ren.device,
 				{
 					texture = texture.texture,
 					view_type = .Shader_Resource_Storage,
@@ -789,8 +921,8 @@ init_ren_texture :: proc(texture: ^Texture, renderer: ^Renderer) -> (error: merc
 	}
 	if .Depth_Stencil_Attachment in texture.desc.usage {
 		assert(texture.desc.type == ._2D, "Depth stencil attachment only supports 2D textures")
-		texture.dsv = renderer.instance->create_2d_texture_view(
-			renderer.device,
+		texture.dsv = ren.instance->create_2d_texture_view(
+			ren.device,
 			{
 				texture = texture.texture,
 				view_type = .Depth_Stencil_Attachment,
@@ -801,8 +933,8 @@ init_ren_texture :: proc(texture: ^Texture, renderer: ^Renderer) -> (error: merc
 	}
 	if .Color_Attachment in texture.desc.usage {
 		assert(texture.desc.type == ._2D, "Render target only supports 2D textures")
-		texture.rtv = renderer.instance->create_2d_texture_view(
-			renderer.device,
+		texture.rtv = ren.instance->create_2d_texture_view(
+			ren.device,
 			{
 				texture = texture.texture,
 				view_type = .Color_Attachment,
@@ -812,45 +944,66 @@ init_ren_texture :: proc(texture: ^Texture, renderer: ^Renderer) -> (error: merc
 		) or_return
 	}
 
-	ren_texture_set_name(texture, texture.name, renderer)
+	ren_texture_set_name(texture, texture.name, ren)
 
 	return
 }
 
-deinit_ren_texture :: proc(texture: ^Texture, renderer: ^Renderer) {
+deinit_ren_texture :: proc(texture: ^Texture, ren: ^Renderer) {
 	if texture.srv != nil {
-		renderer.instance->destroy_descriptor(renderer.device, texture.srv)
+		ren.instance->destroy_descriptor(ren.device, texture.srv)
 	}
 	if texture.uav != nil {
-		renderer.instance->destroy_descriptor(renderer.device, texture.uav)
+		ren.instance->destroy_descriptor(ren.device, texture.uav)
 	}
 	if texture.dsv != nil {
-		renderer.instance->destroy_descriptor(renderer.device, texture.dsv)
+		ren.instance->destroy_descriptor(ren.device, texture.dsv)
 	}
 	if texture.rtv != nil {
-		renderer.instance->destroy_descriptor(renderer.device, texture.rtv)
+		ren.instance->destroy_descriptor(ren.device, texture.rtv)
 	}
 	if texture.texture != nil {
-		renderer.instance->deinit_ren_texture(texture.texture)
+		ren.instance->deinit_ren_texture(texture.texture)
 	}
 	texture^ = {}
 }
 
-ren_texture_set_name :: proc(texture: ^Texture, name: string, renderer: ^Renderer) {
+ren_texture_barrier :: proc(
+	texture: ^Texture,
+	new_stage: mercury.Access_Layout_Stage,
+	ren: ^Renderer,
+	execute: bool = false,
+) {
+	cmd, begin_ok := begin_transfer(ren)
+	if !begin_ok {
+		return
+	}
+	if texture.state.access == new_stage.access &&
+	   texture.state.layout == new_stage.layout &&
+	   texture.state.stages == new_stage.stages {return}
+	// log.warnf("barrier({}) {} -> {}", texture.name, texture.state, new_stage)
+	ren.instance->cmd_barrier(
+		cmd,
+		{textures = {{texture = texture.texture, before = texture.state, after = new_stage}}},
+	)
+	texture.state = new_stage
+}
+
+ren_texture_set_name :: proc(texture: ^Texture, name: string, ren: ^Renderer) {
 	if texture.texture != nil {
-		renderer.instance->set_texture_debug_name(texture.texture, name)
+		ren.instance->set_texture_debug_name(texture.texture, name)
 	}
 	if texture.srv != nil {
-		renderer.instance->set_descriptor_debug_name(texture.srv, name)
+		ren.instance->set_descriptor_debug_name(texture.srv, name)
 	}
 	if texture.uav != nil {
-		renderer.instance->set_descriptor_debug_name(texture.uav, name)
+		ren.instance->set_descriptor_debug_name(texture.uav, name)
 	}
 	if texture.dsv != nil {
-		renderer.instance->set_descriptor_debug_name(texture.dsv, name)
+		ren.instance->set_descriptor_debug_name(texture.dsv, name)
 	}
 	if texture.rtv != nil {
-		renderer.instance->set_descriptor_debug_name(texture.rtv, name)
+		ren.instance->set_descriptor_debug_name(texture.rtv, name)
 	}
 	texture.name = name
 }
@@ -864,7 +1017,7 @@ Texture_Subresource_Upload_Desc :: struct {
 
 ren_texture_upload :: proc(
 	texture: ^Texture,
-	renderer: ^Renderer,
+	ren: ^Renderer,
 	subresources: []Texture_Subresource_Upload_Desc = {},
 	after: mercury.Access_Layout_Stage = {},
 	layer_offset: u32 = 0,
@@ -873,8 +1026,8 @@ ren_texture_upload :: proc(
 ) -> (
 	error: mercury.Error,
 ) {
-	desc := renderer.instance->get_texture_desc(texture.texture)
-	device_desc := renderer.instance->get_device_desc(renderer.device)
+	desc := ren.instance->get_texture_desc(texture.texture)
+	device_desc := ren.instance->get_device_desc(ren.device)
 	upload_buffer_texture_row_alignment := device_desc.upload_buffer_texture_row_alignment
 	upload_buffer_texture_slice_alignment := device_desc.upload_buffer_texture_slice_alignment
 
@@ -892,8 +1045,8 @@ ren_texture_upload :: proc(
 			)
 			content_size := u64(u64(aligned_slice_pitch) * u64(subresource.slice_num))
 
-			eph := acquire_eph_buffer(renderer, content_size)
-			defer return_eph_buffer(renderer, eph)
+			eph := acquire_eph_buffer(ren, content_size)
+			defer return_eph_buffer(ren, eph)
 
 			buffer_len_before := eph.len
 			for slice in 0 ..< subresource.slice_num {
@@ -905,7 +1058,7 @@ ren_texture_upload :: proc(
 						&eph,
 						data,
 						mercury.ACCESS_STAGE_COPY_DESTINATION,
-						renderer,
+						ren,
 						false,
 					) or_return
 				}
@@ -920,52 +1073,26 @@ ren_texture_upload :: proc(
 			dst_region.layer_offset = mercury.dim(layer)
 			dst_region.mip_offset = mercury.mip(mip)
 
-			cmd, begin_ok := begin_transfer(renderer)
+			cmd, begin_ok := begin_transfer(ren)
 			if !begin_ok do return .Unknown
 			defer {
-				val := end_transfer(renderer)
-				if execute do wait_transfer(renderer, val)
+				val := end_transfer(ren)
+				if execute do wait_transfer(ren, val)
 			}
 
-			renderer.instance->cmd_barrier(
-				cmd,
-				{
-					textures = {
-						{
-							texture = texture.texture,
-							after = {
-								access = {.Copy_Destination},
-								layout = .Copy_Destination,
-								stages = {.Copy},
-							},
-						},
-					},
-				},
+			ren_texture_barrier(
+				texture,
+				{access = {.Copy_Destination}, layout = .Copy_Destination, stages = {.Copy}},
+				ren,
 			)
+			defer ren_texture_barrier(texture, after, ren)
 
-			renderer.instance->cmd_upload_buffer_to_texture(
+			ren.instance->cmd_upload_buffer_to_texture(
 				cmd,
 				texture.texture,
 				dst_region,
 				eph.buffer,
 				data_layout,
-			)
-
-			renderer.instance->cmd_barrier(
-				cmd,
-				{
-					textures = {
-						{
-							texture = texture.texture,
-							before = {
-								access = {.Copy_Destination},
-								layout = .Copy_Destination,
-								stages = {.Copy},
-							},
-							after = after,
-						},
-					},
-				},
 			)
 		}
 	}
