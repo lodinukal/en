@@ -3105,7 +3105,9 @@ create_graphics_pipeline :: proc(
 
 	// shaders
 	for shader in desc.shaders {
-		assert(card(shader.stage) == 1, "Only one shader per stage is supported")
+		count := card(shader.stage)
+		if count == 0 do continue
+		assert(count == 1, "Only one shader per stage is supported")
 		if shader.stage == {.Vertex_Shader} {
 			pso_desc.VS.pShaderBytecode = raw_data(shader.bytecode[.DXIL])
 			pso_desc.VS.BytecodeLength = len(shader.bytecode[.DXIL])

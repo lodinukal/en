@@ -181,6 +181,7 @@ class Builder:
             args.append("-no-bounds-check")
             args.append("-microarch:native")
 
+        args.append("-ignore-unknown-attributes")
         args.append(f"-target:{self.target()}")
         args.append(f"-out:{self.output}/{self.proj}{self.extension()}")
         args.append(f"-build-mode:{self.mode.name}")
@@ -195,7 +196,7 @@ class Builder:
             subprocess.run(
                 [f"./{self.output}/{self.proj}{self.extension()}"],
                 check=True,
-                cwd=self.output,
+                cwd=".",
             )
         else:
             print(f"Cannot run a {self.mode.name}.")

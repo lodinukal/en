@@ -58,6 +58,8 @@ Renderer :: struct {
 	descriptor_pool:  ^mercury.Descriptor_Pool,
 	// components
 	resource_pool:    Resource_Pool,
+	// shader
+	shader_context:   Shader_Context,
 }
 
 init_renderer :: proc(ren: ^Renderer) -> (ok: bool) {
@@ -169,6 +171,11 @@ init_renderer :: proc(ren: ^Renderer) -> (ok: bool) {
 	// image pool
 	if ok_init_resource_pool := init_resource_pool(&ren.resource_pool, ren);
 	   ok_init_resource_pool == false {
+		return false
+	}
+
+	// shader context
+	if create_shader_context(&ren.shader_context, false) == false {
 		return false
 	}
 
@@ -284,6 +291,8 @@ destroy_renderer :: proc(ren: ^Renderer) {
 	ren.instance->destroy_fence(ren.main_fence)
 	ren.instance->destroy_device(ren.device)
 	ren.instance->destroy()
+
+	destroy_shader_context(&ren.shader_context)
 }
 
 get_render_frame :: proc(ren: ^Renderer) -> ^Frame {

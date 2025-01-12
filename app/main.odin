@@ -1,14 +1,11 @@
 package app
 
 import "core:container/small_array"
-import "core:encoding/cbor"
 @(require) import "core:fmt"
-import "core:io"
 import "core:log"
 import "core:math"
 import "core:math/linalg"
 @(require) import "core:mem"
-import "core:os"
 import "core:time"
 
 import "en:mercury"
@@ -71,63 +68,9 @@ main :: proc() {
 	if !init_renderer(&ren) do return
 	defer destroy_renderer(&ren)
 
-	session: Shader_Context
-	slang_ok := create_shader_context(&session)
-	if !slang_ok {
-		log.errorf("Could not create global session")
-		return
-	}
-	defer destroy_shader_context(&session)
-
-	forward_compiled, ok_forward := compile_shader(
-		&session,
-		"assets/forward.slang",
-		{.Vertex_Shader, .Fragment_Shader},
-		allocator = context.allocator,
-	)
-	if !ok_forward {
-		log.errorf("Could not compile shader")
-		return
-	}
-	defer {
-		for code in forward_compiled {
-			free_shader(code)
-		}
-	}
-	log_shader(forward_compiled)
-
-	// draw_dispatch, ok_dispatch := compile_shader(
-	// 	&session,
-	// 	"assets/draw_dispatch.slang",
-	// 	{.Compute_Shader},
-	// 	allocator = context.temp_allocator,
-	// )
-	// if !ok_dispatch {
-	// 	log.errorf("Could not compile shader")
-	// 	return
-	// }
-	// log_shader(draw_dispatch)
-
-	encode_cbor_to_file :: proc(name: string, data: $T) {
-		file, err := os.open(name, os.O_RDWR | os.O_CREATE | os.O_TRUNC)
-		if err != nil {
-			log.errorf("Could not open file: {}", err)
-			return
-		}
-		defer os.close(file)
-		stream := os.stream_from_handle(file)
-		w := io.to_writer(stream)
-		marshal_err := cbor.marshal_into_writer(w, data, flags = cbor.ENCODE_FULLY_DETERMINISTIC)
-		if marshal_err != nil {
-			log.errorf("Could not marshal: {}", marshal_err)
-			return
-		}
-	}
-	encode_cbor_to_file("forward.enshader", forward_compiled)
-	// encode_cbor_to_file("draw_dispatch.enshader", draw_dispatch)
-
-	forward_pipeline_layout, forward_pipeline_layout_err := ren.instance->create_pipeline_layout(
-		ren.device,
+	graphics_layout, graphics_layout_ok := ren_register_pipeline_layout(
+		&ren,
+		"Graphics Pipeline Layout",
 		{
 			constants = {{size = size_of(Gpu_Object_Data), shader_stages = {.Vertex_Shader}}},
 			descriptor_sets = {
@@ -139,20 +82,17 @@ main :: proc() {
 			enable_d3d12_draw_parameters_emulation = true,
 		},
 	)
-	if forward_pipeline_layout_err != nil {
-		log.errorf("Could not create pipeline layout: {}", forward_pipeline_layout_err)
+	if !graphics_layout_ok {
+		log.errorf("Could not create pipeline layout: {}", graphics_layout_ok)
 		return
 	}
-	defer ren.instance->destroy_pipeline_layout(forward_pipeline_layout)
-	ren.instance->set_pipeline_layout_debug_name(
-		forward_pipeline_layout,
-		"Forward Pipeline Layout",
-	)
+	defer ren_unregister_pipeline_layout(&ren, graphics_layout)
 
-	forward_pipeline, forward_pipeline_err := ren.instance->create_graphics_pipeline(
-		ren.device,
-		{
-			pipeline_layout = forward_pipeline_layout,
+	forward_pipeline, forward_ok := ren_register_pipeline(
+		&ren,
+		{kind = .File, name = "forward", data = "assets/forward.slang"},
+		graphics_layout,
+		mercury.Graphics_Pipeline_Desc {
 			vertex_input = VERTEX_INPUT_DEFAULT,
 			input_assembly = {topology = .Triangle_List},
 			rasterization = {
@@ -166,26 +106,16 @@ main :: proc() {
 				depth = {write = true, compare_func = .Less},
 				depth_stencil_format = .D32_SFLOAT,
 			},
-			shaders = {
-				{
-					stage = {.Vertex_Shader},
-					bytecode = forward_compiled[.Vertex],
-					entry_point_name = "vs_main",
-				},
-				{
-					stage = {.Fragment_Shader},
-					bytecode = forward_compiled[.Fragment],
-					entry_point_name = "fs_main",
-				},
+			shaders = #partial [mercury.Shader_Stage]mercury.Shader_Desc {
+				.Vertex = {stage = {.Vertex_Shader}, entry_point_name = "vs_main"},
+				.Fragment = {stage = {.Fragment_Shader}, entry_point_name = "fs_main"},
 			},
 		},
 	)
-	if forward_pipeline_err != nil {
-		log.errorf("Could not create pipeline: {}", forward_pipeline_err)
+	if !forward_ok {
+		log.errorf("Could not create pipeline: {}", forward_pipeline)
 		return
 	}
-	defer ren.instance->destroy_pipeline(forward_pipeline)
-	ren.instance->set_pipeline_debug_name(forward_pipeline, "Forward Pipeline")
 
 	scene: Scene
 	init_scene(&scene, &ren)
@@ -313,13 +243,6 @@ main :: proc() {
 			}
 		}
 
-		cmd := begin_rendering(&ren) or_break
-		defer if end_rendering(&ren) == false {
-			running = false
-		}
-
-		frame := get_render_frame(&ren)
-
 		// if mouse right down, capture mouse, if not then release
 		if mouse_buttons[.Right] {
 			if !mouse_grabbed {
@@ -332,6 +255,8 @@ main :: proc() {
 				mouse_grabbed = false
 			}
 		}
+
+		ren_refresh_all_pipelines(&ren) or_break
 
 		camera_projection := linalg.matrix4_perspective_f32(
 			45 * math.PI / 180.0,
@@ -389,9 +314,15 @@ main :: proc() {
 
 		ren.resource_pool.frame_constants.view = camera_view
 		ren.resource_pool.frame_constants.projection = camera_projection
-		ren.resource_pool.frame_constants.light_color = {1, 1, 1, 1}
-		ren.resource_pool.frame_constants.light_dir = {0, 1, 1, 0}
+		ren.resource_pool.frame_constants.light_color = {100, 100, 100, 1}
+		ren.resource_pool.frame_constants.light_dir = {1, 1, 1, 0}
 		copy_frame_constants(&ren.resource_pool)
+
+		cmd := begin_rendering(&ren) or_break
+		defer if end_rendering(&ren) == false {
+			running = false
+		}
+		frame := get_render_frame(&ren)
 
 		ren.instance->cmd_barrier(
 			cmd,
@@ -463,8 +394,8 @@ main :: proc() {
 			},
 		)
 
-		ren.instance->cmd_set_pipeline_layout(cmd, forward_pipeline_layout)
-		ren.instance->cmd_set_pipeline(cmd, forward_pipeline)
+		ren_set_pipeline_layout(&ren, cmd, graphics_layout)
+		ren_set_pipeline(&ren, cmd, forward_pipeline)
 		ren_buffer_set_vertex(&ren.resource_pool.buffers[.Vertex], &ren, cmd, 0, 0)
 		ren_buffer_set_index(&ren.resource_pool.buffers[.Index], &ren, cmd, 0, .Uint16)
 		ren_bind_draw_constants_ds(&ren, cmd, 0)
@@ -482,29 +413,18 @@ main :: proc() {
 	renderer_wait_idle(&ren)
 }
 
-log_shader :: proc(shaders: [Shader_Stage][mercury.Shader_Target][]u8) {
-	for code_set, stage in shaders {
-		for code, target in code_set {
-			if len(code) == 0 do continue
-			log.infof("Shader stage: {} {} {}", target, stage, len(code))
-		}
+encode_cbor_to_file :: proc(name: string, data: $T) {
+	file, err := os.open(name, os.O_RDWR | os.O_CREATE | os.O_TRUNC)
+	if err != nil {
+		log.errorf("Could not open file: {}", err)
+		return
 	}
-
-	if shaders[.Vertex][.DXIL] != nil {
-		// dump to file
-		os.write_entire_file("vertex.dxil", shaders[.Vertex][.DXIL])
-	}
-	if shaders[.Fragment][.DXIL] != nil {
-		// dump to file
-		os.write_entire_file("fragment.dxil", shaders[.Fragment][.DXIL])
-	}
-
-	if shaders[.Vertex][.METAL] != nil {
-		// dump to file
-		os.write_entire_file("vertex.metal", shaders[.Vertex][.METAL])
-	}
-	if shaders[.Fragment][.METAL] != nil {
-		// dump to file
-		os.write_entire_file("fragment.metal", shaders[.Fragment][.METAL])
+	defer os.close(file)
+	stream := os.stream_from_handle(file)
+	w := io.to_writer(stream)
+	marshal_err := cbor.marshal_into_writer(w, data, flags = cbor.ENCODE_FULLY_DETERMINISTIC)
+	if marshal_err != nil {
+		log.errorf("Could not marshal: {}", marshal_err)
+		return
 	}
 }

@@ -12,5 +12,6 @@
       "name": "external",
       "path": "external"
     }
-  ]
+  ],
+  "checker_args": "-ignore-unknown-attributes"
 }

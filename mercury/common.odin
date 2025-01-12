@@ -753,6 +753,13 @@ Ray_Tracing_Stages: Stage_Flags : {
 	.Callable_Shader,
 }
 
+// only used for specifying pipeline stages
+Shader_Stage :: enum {
+	Vertex,
+	Fragment,
+	Compute,
+}
+
 Viewport :: struct {
 	x, y, width, height, min_depth, max_depth: f32,
 	origin_bottom_left:                        bool,
@@ -1488,7 +1495,7 @@ Graphics_Pipeline_Desc :: struct {
 	// optional
 	multisample:     Multisample_Desc,
 	output_merger:   Output_Merger_Desc,
-	shaders:         []Shader_Desc,
+	shaders:         #sparse[Shader_Stage]Shader_Desc,
 }
 
 Compute_Pipeline_Desc :: struct {

@@ -2,26 +2,6 @@ public static const uint32_t LIGHT_MATERIAL = 2u;
 public static const uint32_t WHITE_TEXTURE = 0u;
 public static const uint32_t BLACK_TEXTURE = 1u;
 
-public struct Light
-{
-    public float3 position;
-    public float radius;
-    public float3 color;
-}
-
-public struct AreaLight
-{
-    public float3 color;
-    public float intensity;
-    public float3 points[4];
-};
-
-public struct BoundingSphere
-{
-    public float3 center;
-    public float radius;
-};
-
 public struct Geometry
 {
     public uint vertex_offset;

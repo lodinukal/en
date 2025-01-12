@@ -1,16 +1,23 @@
 package app
 
+import "core:container/small_array"
+import "core:dynlib"
+import "core:fmt"
 import "core:log"
 import "core:math/linalg/hlsl"
 import "core:mem"
+import "core:os"
 import "core:slice"
+import "core:strings"
 import "en:mercury"
+
+import sp "external:slang/slang"
 
 Frame_Constants :: struct #align (1) {
 	view:        hlsl.float4x4,
 	projection:  hlsl.float4x4,
-	light_dir:   hlsl.float4,
 	light_color: hlsl.float4,
+	light_dir:   hlsl.float4,
 }
 
 Draw_Data :: struct {
@@ -63,6 +70,17 @@ Material_Geometry_Pair :: struct {
 	material: Material_Handle,
 }
 
+Pipeline_Layout_Handle :: distinct u32
+Pipeline_Handle :: distinct u32
+Stored_Pipeline :: struct {
+	object:           ^mercury.Pipeline,
+	desc:             Pipeline_Desc,
+	source:           Shader_Source,
+	layout:           Pipeline_Layout_Handle,
+	compiled_shaders: [mercury.Shader_Stage][mercury.Shader_Target][]u8,
+	last_write_time:  Maybe(os.File_Time),
+}
+
 INITIAL_GEOMETRY_COUNT :: 64
 // INITIAL_INSTANCE_COUNT :: 256
 INITIAL_MATERIAL_COUNT :: 32
@@ -94,6 +112,12 @@ Resource_Pool :: struct {
 	buffers:                  [BUFFER_ID]Ren_Buffer,
 	frame_constants:          Frame_Constants,
 	mapped_constants:         ^Frame_Constants,
+	pipeline:                 struct {
+		layouts:        [dynamic]^mercury.Pipeline_Layout,
+		free_layouts:   [dynamic]uint,
+		pipelines:      [dynamic]Stored_Pipeline,
+		free_pipelines: [dynamic]uint,
+	},
 	object:                   struct {
 		list: [dynamic]Object_Data,
 	},
@@ -345,6 +369,24 @@ destroy_resource_pool :: proc(pool: ^Resource_Pool, ren: ^Renderer) {
 	delete(pool.object.list)
 	delete(pool.draws.list)
 
+	for layout in pool.pipeline.layouts {
+		if layout == nil do continue
+		ren.instance->destroy_pipeline_layout(layout)
+	}
+	delete(pool.pipeline.layouts)
+	delete(pool.pipeline.free_layouts)
+
+	for &pipeline in pool.pipeline.pipelines {
+		if pipeline.object == nil do continue
+		ren.instance->destroy_pipeline(pipeline.object)
+		for &shader in pipeline.compiled_shaders {
+			for &code in shader {
+				delete(code)
+			}
+		}
+	}
+	delete(pool.pipeline.pipelines)
+	delete(pool.pipeline.free_pipelines)
 }
 
 copy_frame_constants :: proc(pool: ^Resource_Pool) {
@@ -409,6 +451,223 @@ ren_resource_descriptor_desc :: proc(
 			context.temp_allocator,
 		),
 	}
+}
+
+ren_register_pipeline_layout :: proc(
+	ren: ^Renderer,
+	name: string,
+	layout: mercury.Pipeline_Layout_Desc,
+) -> (
+	handle: Pipeline_Layout_Handle,
+	ok: bool = true,
+) {
+	pool := &ren.resource_pool
+	pos: uint = 0
+	pop_ok: bool = false
+	if pos, pop_ok = pop_safe(&pool.pipeline.free_layouts); !pop_ok {
+		pos = len(pool.pipeline.layouts)
+		if _, append_err := append(&pool.pipeline.layouts, nil); append_err != nil {
+			log.errorf("Could not append pipeline layout: {}", append_err)
+			ok = false
+			return
+		}
+	}
+
+	error: mercury.Error
+	pool.pipeline.layouts[pos], error = ren.instance->create_pipeline_layout(ren.device, layout)
+	if error != nil {
+		log.errorf("Could not create pipeline layout: {}", error)
+		ok = false
+		return
+	}
+	ren.instance->set_pipeline_layout_debug_name(pool.pipeline.layouts[pos], name)
+
+	handle = Pipeline_Layout_Handle(pos)
+	return
+}
+
+ren_unregister_pipeline_layout :: proc(ren: ^Renderer, handle: Pipeline_Layout_Handle) {
+	pool := &ren.resource_pool
+	append(&pool.pipeline.free_layouts, uint(handle))
+	ren.instance->destroy_pipeline_layout(pool.pipeline.layouts[handle])
+	pool.pipeline.layouts[handle] = nil
+}
+
+ren_set_pipeline_layout :: proc(
+	ren: ^Renderer,
+	cmd: ^mercury.Command_Buffer,
+	handle: Pipeline_Layout_Handle,
+) {
+	ren.instance->cmd_set_pipeline_layout(cmd, ren.resource_pool.pipeline.layouts[handle])
+}
+
+Shader_Source_Kind :: enum {
+	File,
+	Source,
+}
+
+Shader_Source :: struct {
+	kind:  Shader_Source_Kind,
+	name:  string,
+	data:  string,
+	// only valid when kind is .File
+	watch: bool,
+}
+
+Pipeline_Desc :: union {
+	mercury.Graphics_Pipeline_Desc,
+	mercury.Compute_Pipeline_Desc,
+}
+
+ren_register_pipeline :: proc(
+	ren: ^Renderer,
+	shader_source: Shader_Source,
+	layout: Pipeline_Layout_Handle,
+	desc: Pipeline_Desc,
+) -> (
+	handle: Pipeline_Handle,
+	ok: bool = true,
+) {
+	pool := &ren.resource_pool
+	pos: uint = 0
+	pop_ok: bool = false
+	if pos, pop_ok = pop_safe(&pool.pipeline.free_pipelines); !pop_ok {
+		pos = len(pool.pipeline.pipelines)
+		if _, append_err := append_elem(&pool.pipeline.pipelines, Stored_Pipeline{});
+		   append_err != nil {
+			log.errorf("Could not append pipeline: {}", append_err)
+			ok = false
+			return
+		}
+	}
+	pool.pipeline.pipelines[pos].source = shader_source
+	pool.pipeline.pipelines[pos].layout = layout
+	pool.pipeline.pipelines[pos].desc = desc
+
+	if shader_source.kind == .File {
+		os_error: os.Error
+		pool.pipeline.pipelines[pos].last_write_time, os_error = os.last_write_time_by_name(
+			shader_source.data,
+		)
+		if os_error != nil {
+			log.errorf("Could not get last write time: {}", os_error)
+			ok = false
+			return
+		}
+	}
+
+	layout := pool.pipeline.layouts[layout]
+
+	stages: mercury.Stage_Flags
+	// make sure no bytecode is set right now
+	switch &v in pool.pipeline.pipelines[pos].desc {
+	case mercury.Compute_Pipeline_Desc:
+		stages = {.Compute_Shader}
+		v.pipeline_layout = layout
+	case mercury.Graphics_Pipeline_Desc:
+		stages = {.Vertex_Shader, .Fragment_Shader}
+		v.pipeline_layout = layout
+	}
+
+	target: mercury.Shader_Target
+	switch ren.instance.api {
+	case .D3D12:
+		target = .DXIL
+	case .Vulkan:
+		target = .SPIRV
+	}
+
+	pool.pipeline.pipelines[pos].compiled_shaders = compile_shader(
+		&ren.shader_context,
+		shader_source,
+		stages,
+		only = target,
+	) or_return
+
+	switch &v in pool.pipeline.pipelines[pos].desc {
+	case mercury.Compute_Pipeline_Desc:
+		v.shader.bytecode = pool.pipeline.pipelines[pos].compiled_shaders[.Compute]
+	case mercury.Graphics_Pipeline_Desc:
+		v.shaders[.Vertex].bytecode = pool.pipeline.pipelines[pos].compiled_shaders[.Vertex]
+		v.shaders[.Fragment].bytecode = pool.pipeline.pipelines[pos].compiled_shaders[.Fragment]
+	}
+
+	error: mercury.Error
+	switch &v in pool.pipeline.pipelines[pos].desc {
+	case mercury.Compute_Pipeline_Desc:
+		pool.pipeline.pipelines[pos].object, error =
+		ren.instance->create_compute_pipeline(ren.device, v)
+	case mercury.Graphics_Pipeline_Desc:
+		pool.pipeline.pipelines[pos].object, error =
+		ren.instance->create_graphics_pipeline(ren.device, v)
+	}
+	ren.instance->set_pipeline_debug_name(pool.pipeline.pipelines[pos].object, shader_source.name)
+
+	handle = Pipeline_Handle(pos)
+	return
+}
+
+ren_unregister_pipeline :: proc(ren: ^Renderer, handle: Pipeline_Handle) {
+	pool := &ren.resource_pool
+	append(&pool.pipeline.free_pipelines, uint(handle))
+	for &shader in pool.pipeline.pipelines[handle].compiled_shaders {
+		for &code in shader {
+			delete(code)
+			code = nil
+		}
+	}
+	switch &v in pool.pipeline.pipelines[handle].desc {
+	case mercury.Compute_Pipeline_Desc:
+		for &code in v.shader.bytecode {
+			code = nil
+		}
+	case mercury.Graphics_Pipeline_Desc:
+		for &shader in v.shaders {
+			for &code in shader.bytecode {
+				code = nil
+			}
+		}
+	}
+	ren.instance->destroy_pipeline(pool.pipeline.pipelines[handle].object)
+	pool.pipeline.pipelines[handle].object = nil
+}
+
+ren_refresh_pipeline :: proc(ren: ^Renderer, handle: Pipeline_Handle) -> (ok: bool = true) {
+	source := ren.resource_pool.pipeline.pipelines[handle].source
+	desc := ren.resource_pool.pipeline.pipelines[handle].desc
+	layout := ren.resource_pool.pipeline.pipelines[handle].layout
+	log.infof("Refreshing pipeline: {}", source.name)
+	ren_unregister_pipeline(ren, handle)
+	new_handle := ren_register_pipeline(ren, source, layout, desc) or_return
+	assert(new_handle == handle)
+	return
+}
+
+ren_refresh_all_pipelines :: proc(ren: ^Renderer, only_changed := true) -> (ok: bool) {
+	for &pipeline, i in ren.resource_pool.pipeline.pipelines {
+		if pipeline.object == nil {
+			continue
+		}
+		if only_changed {
+			if pipeline.source.kind != .File {
+				continue
+			}
+			last_write_time, os_error := os.last_write_time_by_name(pipeline.source.data)
+			if os_error != nil {
+				log.errorf("Could not get last write time: {}", os_error)
+				return false
+			}
+			if last_write_time == pipeline.last_write_time {
+				continue
+			}
+		}
+		ren_refresh_pipeline(ren, Pipeline_Handle(i)) or_return
+	}
+	return true
+}
+
+ren_set_pipeline :: proc(ren: ^Renderer, cmd: ^mercury.Command_Buffer, handle: Pipeline_Handle) {
+	ren.instance->cmd_set_pipeline(cmd, ren.resource_pool.pipeline.pipelines[handle].object)
 }
 
 ren_add_texture :: proc(
@@ -780,4 +1039,303 @@ VERTEX_INPUT_DEFAULT := mercury.Vertex_Input_Desc {
 		},
 	},
 	streams    = {{stride = size_of(Vertex_Default), binding_slot = 0, step_rate = .Per_Vertex}},
+}
+
+slang_check :: #force_inline proc(#any_int result: int, loc := #caller_location) -> bool {
+	result := -sp.Result(result)
+	if sp.FAILED(result) {
+		code := sp.GET_RESULT_CODE(result)
+		facility := sp.GET_RESULT_FACILITY(result)
+		estr: string
+		switch sp.Result(result) {
+		case:
+			estr = "Unknown error"
+		case sp.E_NOT_IMPLEMENTED():
+			estr = "E_NOT_IMPLEMENTED"
+		case sp.E_NO_INTERFACE():
+			estr = "E_NO_INTERFACE"
+		case sp.E_ABORT():
+			estr = "E_ABORT"
+		case sp.E_INVALID_HANDLE():
+			estr = "E_INVALID_HANDLE"
+		case sp.E_INVALID_ARG():
+			estr = "E_INVALID_ARG"
+		case sp.E_OUT_OF_MEMORY():
+			estr = "E_OUT_OF_MEMORY"
+		case sp.E_BUFFER_TOO_SMALL():
+			estr = "E_BUFFER_TOO_SMALL"
+		case sp.E_UNINITIALIZED():
+			estr = "E_UNINITIALIZED"
+		case sp.E_PENDING():
+			estr = "E_PENDING"
+		case sp.E_CANNOT_OPEN():
+			estr = "E_CANNOT_OPEN"
+		case sp.E_NOT_FOUND():
+			estr = "E_NOT_FOUND"
+		case sp.E_INTERNAL_FAIL():
+			estr = "E_INTERNAL_FAIL"
+		case sp.E_NOT_AVAILABLE():
+			estr = "E_NOT_AVAILABLE"
+		case sp.E_TIME_OUT():
+			estr = "E_TIME_OUT"
+		}
+
+		log.errorf("Failed with error: %v (%v) Facility: %v", estr, code, facility, location = loc)
+		return false
+	}
+	return true
+}
+
+diagnostics_check :: #force_inline proc(diagnostics: ^sp.IBlob, loc := #caller_location) {
+	if diagnostics != nil {
+		buffer := slice.bytes_from_ptr(
+			diagnostics->getBufferPointer(),
+			int(diagnostics->getBufferSize()),
+		)
+		log.errorf("Diagnostics: {}", string(buffer), location = loc)
+	}
+}
+
+@(private = "file")
+slang_lib: struct {
+	__handle:            dynlib.Library,
+	createGlobalSession: proc "c" (
+		apiVersion: sp.Int,
+		outGlobalSession: ^^sp.IGlobalSession,
+	) -> sp.Result,
+	shutdown:            proc "c" (),
+}
+
+Shader_Context :: struct {
+	global_session: ^sp.IGlobalSession,
+	session_desc:   sp.SessionDesc,
+}
+
+create_shader_context :: proc(ctx: ^Shader_Context, debug := true) -> (ok: bool = true) {
+	// attempt to load
+	if slang_lib.__handle == nil {
+		count := dynlib.initialize_symbols(&slang_lib, "slang", "slang_") or_return
+		if count != 2 {
+			log.warnf("Could only load {} symbols", count)
+			return false
+		}
+	}
+	slang_check(slang_lib.createGlobalSession(sp.API_VERSION, &ctx.global_session)) or_return
+	@(static) sm_6_profile: sp.ProfileID
+	if sm_6_profile == nil {
+		sm_6_profile = ctx.global_session->findProfile("sm_6_3")
+	}
+	target_dxil_desc := sp.TargetDesc {
+		structureSize = size_of(sp.TargetDesc),
+		format        = .DXIL,
+		flags         = {},
+		profile       = sm_6_profile,
+	}
+
+	target_spirv_desc := sp.TargetDesc {
+		structureSize = size_of(sp.TargetDesc),
+		format        = .SPIRV,
+		flags         = {},
+		profile       = sm_6_profile,
+	}
+
+	target_msl_desc := sp.TargetDesc {
+		structureSize = size_of(sp.TargetDesc),
+		format        = .METAL,
+		flags         = {},
+		profile       = sm_6_profile,
+	}
+
+	@(static) targets: [3]sp.TargetDesc
+	targets = [?]sp.TargetDesc{target_dxil_desc, target_spirv_desc, target_msl_desc}
+
+	@(static) compiler_option_entries: [6]sp.CompilerOptionEntry
+	compiler_option_entries = [?]sp.CompilerOptionEntry {
+		{name = .VulkanUseEntryPointName, value = {intValue0 = 1}},
+		{name = .VulkanBindShiftAll, value = {intValue0 = 0, intValue1 = 0}},
+		{name = .VulkanBindShiftAll, value = {intValue0 = 1, intValue1 = 0}},
+		{name = .VulkanBindShiftAll, value = {intValue0 = 2, intValue1 = 0}},
+		{name = .VulkanBindShiftAll, value = {intValue0 = 3, intValue1 = 0}},
+		{
+			name = .DebugInformation,
+			value = {
+				kind = .Int,
+				intValue0 = auto_cast (sp.DebugInfoLevel.MAXIMAL if debug else sp.DebugInfoLevel.NONE),
+			},
+		},
+	}
+	ctx.session_desc = sp.SessionDesc {
+		structureSize            = size_of(sp.SessionDesc),
+		targets                  = raw_data(targets[:]),
+		targetCount              = len(targets),
+		compilerOptionEntries    = &compiler_option_entries[0],
+		compilerOptionEntryCount = len(compiler_option_entries),
+	}
+
+	return
+}
+
+destroy_shader_context :: proc(ctx: ^Shader_Context) {
+	if ctx == nil do return
+	ctx.global_session->release()
+	if slang_lib.__handle != nil {
+		slang_lib.shutdown()
+		dynlib.unload_library(slang_lib.__handle)
+		slang_lib.__handle = nil
+	}
+}
+
+@(private = "file")
+MAX_LINK_COMPONENTS :: 6
+@(private = "file")
+Component_Small_Array :: small_array.Small_Array(MAX_LINK_COMPONENTS, ^sp.IComponentType)
+
+compile_shader :: proc(
+	ctx: ^Shader_Context,
+	source: Shader_Source,
+	stages: mercury.Stage_Flags,
+	only: Maybe(mercury.Shader_Target) = nil,
+	allocator := context.allocator,
+) -> (
+	result: [mercury.Shader_Stage][mercury.Shader_Target][]u8,
+	ok: bool = true,
+) {
+	if ctx == nil {
+		log.errorf("No context")
+		ok = false
+		return
+	}
+	diagnostics: ^sp.IBlob
+	r: sp.Result
+
+	session: ^sp.ISession
+	slang_check(ctx.global_session->createSession(ctx.session_desc, &session)) or_return
+	defer session->release()
+
+	source_name_as_cstring, clone_cstring_name_err := strings.clone_to_cstring(
+		source.name,
+		context.temp_allocator,
+	)
+	if clone_cstring_name_err != nil {
+		log.errorf("Could not clone source name: {}", clone_cstring_name_err)
+		ok = false
+		return
+	}
+
+	source_data_as_cstring, clone_cstring_data_err := strings.clone_to_cstring(
+		source.data,
+		context.temp_allocator,
+	)
+	if clone_cstring_data_err != nil {
+		log.errorf("Could not clone source data: {}", clone_cstring_data_err)
+		ok = false
+		return
+	}
+
+	module: ^sp.IModule
+	switch source.kind {
+	case .File:
+		module = session->loadModule(source_data_as_cstring, &diagnostics)
+	case .Source:
+		module =
+		session->loadModuleFromSourceString(
+			source_name_as_cstring,
+			fmt.ctprintf("inline:%v", source_name_as_cstring),
+			source_data_as_cstring,
+			&diagnostics,
+		)
+	}
+	diagnostics_check(diagnostics)
+	if module == nil {
+		log.errorf("Shader compile error: {}", source_name_as_cstring)
+		ok = false
+		return
+	}
+	defer module->release()
+
+	components: [mercury.Shader_Stage]^sp.IComponentType
+
+	// compute
+	if stages == {.Compute_Shader} {
+		entry_point: ^sp.IEntryPoint
+		slang_check(module->findEntryPointByName("cs_main", &entry_point)) or_return
+		if entry_point == nil {
+			log.errorf("no compute shader entry point")
+			return
+		}
+		components[.Compute] = entry_point
+	} else if stages == {.Vertex_Shader, .Fragment_Shader} {
+		vs_entry_point: ^sp.IEntryPoint
+		fs_entry_point: ^sp.IEntryPoint
+		slang_check(module->findEntryPointByName("vs_main", &vs_entry_point)) or_return
+		slang_check(module->findEntryPointByName("fs_main", &fs_entry_point)) or_return
+
+		if vs_entry_point == nil {
+			log.errorf("no vertex shader entry point")
+			ok = false
+			return
+		}
+
+		components[.Vertex] = vs_entry_point
+		components[.Fragment] = fs_entry_point
+	} else {
+		log.errorf("Unsupported shader stages")
+		ok = false
+		return
+	}
+
+	for &output_set, stage in result {
+		if components[stage] == nil do continue
+		composing: Component_Small_Array
+		small_array.append(&composing, components[stage], module)
+
+		composed_program: ^sp.IComponentType
+		r =
+		session->createCompositeComponentType(
+			raw_data(small_array.slice(&composing)),
+			small_array.len(composing),
+			&composed_program,
+			&diagnostics,
+		)
+		diagnostics_check(diagnostics)
+		slang_check(r) or_return
+
+		linked_program: ^sp.IComponentType
+		r = composed_program->link(&linked_program, &diagnostics)
+		diagnostics_check(diagnostics)
+		slang_check(r) or_return
+
+		for &output, target in output_set {
+			if only != nil && only != target do continue
+			target_code: ^sp.IBlob
+			r = linked_program->getEntryPointCode(0, int(target), &target_code, &diagnostics)
+			diagnostics_check(diagnostics)
+			slang_check(r) or_return
+			defer target_code->release()
+
+			code_size := target_code->getBufferSize()
+			source_code := slice.from_ptr(
+				(^u8)(target_code->getBufferPointer()),
+				auto_cast code_size,
+			)
+
+			error: mem.Allocator_Error
+			output, error = slice.clone(source_code, allocator)
+			if error != nil {
+				log.errorf("Failed to allocate memory for shader code")
+				ok = false
+				return
+			}
+		}
+	}
+
+
+	return
+}
+
+free_shader :: proc(result: [mercury.Shader_Target][]u8, allocator := context.allocator) {
+	for output in result {
+		if output == nil do continue
+		free(raw_data(output), allocator)
+	}
 }
